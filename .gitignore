@@ -11,6 +11,8 @@ env/
 
 # Dữ liệu runtime local — không phải source code
 meetings.db
+SESSION_HANDOFF_BLUEPRINT.md
+CONTRACTS.md
 *.db-journal
 *.db-wal
 
