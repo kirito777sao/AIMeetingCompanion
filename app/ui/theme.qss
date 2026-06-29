@@ -1,0 +1,223 @@
+/*
+theme.qss
+---------
+Design tokens theo PROJECT_SPEC.md mục 10.2 (Qt QSS không hỗ trợ CSS
+variables thật, nên giá trị được hardcode trực tiếp -- mỗi chỗ dùng đều
+ghi rõ comment tên token tương ứng để dễ đối chiếu lại với PROJECT_SPEC.md
+khi cần đổi màu).
+
+--bg-base:        #0B0E14
+--bg-surface:      #131722
+--bg-surface-alt:  #1A1F2E
+--border-subtle:   #232938
+--text-primary:    #E6E9EF
+--text-secondary:  #8A93A6
+--text-disabled:   #4D5566
+--accent-primary:  #4F8EF7 / hover #6FA3FF
+--accent-translate:#34D1A6
+--accent-warning:  #F5A623
+--accent-recording:#FF5470
+*/
+
+QWidget {
+    background-color: #0B0E14;          /* --bg-base */
+    color: #E6E9EF;                      /* --text-primary */
+    /* Đổi thứ tự sau khi phát hiện bug lỗi ký tự thật: "Be Vietnam Pro" và
+       "Inter" là Google Fonts, KHÔNG có sẵn trên Windows trừ khi người dùng
+       tự cài -- nếu thiếu, Qt fallback sang font khác, và riêng QTextEdit
+       (khác QLabel) có vẻ xử lý fallback này không ổn với dấu tiếng Việt
+       (xem ghi chú dài hơn + fix code trực tiếp ở suggestion_drawer.py).
+       "Segoe UI" CHẮC CHẮN có sẵn trên mọi Windows 10/11 và hỗ trợ tiếng
+       Việt tốt -- đặt lên đầu để không phụ thuộc font ngoài phải tự cài. */
+    font-family: "Segoe UI", "Be Vietnam Pro", "Inter", sans-serif;
+    font-size: 15px;
+}
+
+QMainWindow {
+    background-color: #0B0E14;          /* --bg-base */
+}
+
+/* ---- Banner ghi âm (consent) ---- */
+#RecordingBanner {
+    background-color: rgba(255, 84, 112, 0.12);  /* --accent-recording 12% opacity */
+    border-bottom: 1px solid #232938;             /* --border-subtle */
+    padding: 8px;
+}
+
+#RecordingBannerLabel {
+    color: #E6E9EF;                      /* --text-primary */
+    font-weight: 600;
+    font-size: 13px;
+}
+
+#RecordingDot {
+    background-color: #FF5470;           /* --accent-recording */
+    border-radius: 6px;
+}
+
+/* ---- Vùng transcript ---- */
+#TranscriptScrollArea {
+    background-color: #0B0E14;           /* --bg-base */
+    border: none;
+}
+
+#TranscriptContainer {
+    background-color: #0B0E14;           /* --bg-base */
+}
+
+/* ---- Transcript bubble ---- */
+#TranscriptBubble {
+    background-color: #131722;           /* --bg-surface */
+    border: 1px solid #232938;            /* --border-subtle */
+    border-radius: 12px;                  /* --radius-md */
+    padding: 4px;
+}
+
+/* WarningChip: dùng khi confidence < ngưỡng (transcript_bubble.py) --
+   set bằng chữ rõ ràng, KHÔNG chỉ dựa vào màu viền tinh tế, để không lặp
+   lại lỗi "có cảnh báo nhưng không ai nhận ra" đã gặp khi test thật. */
+#WarningChip {
+    background-color: rgba(245, 166, 35, 0.14);  /* --accent-warning 14% opacity */
+    color: #F5A623;                                /* --accent-warning */
+    border-radius: 6px;                            /* --radius-sm */
+    padding: 1px 6px;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+#BubbleTimestamp {
+    color: #8A93A6;                       /* --text-secondary */
+    font-size: 12px;
+}
+
+#LanguageChip {
+    background-color: #1A1F2E;            /* --bg-surface-alt */
+    color: #8A93A6;                        /* --text-secondary */
+    border-radius: 6px;                    /* --radius-sm */
+    padding: 1px 6px;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+#OriginalText {
+    color: #E6E9EF;                        /* --text-primary */
+    font-size: 15px;
+    line-height: 150%;
+}
+
+#TranslatedText {
+    color: #34D1A6;                        /* --accent-translate */
+    font-size: 14px;
+    line-height: 150%;
+    padding-left: 8px;
+    border-left: 2px solid #1A1F2E;        /* --bg-surface-alt, vạch phân tách nhẹ */
+}
+
+/* Phase 3 Bước 2/4 — heading 3 mục của ReportDialog (Tóm tắt/Quyết định/
+   Việc cần làm). Dùng accent-primary để phân biệt rõ với nội dung thường
+   (#OriginalText) ngay dưới nó, không cần thêm màu mới ngoài bảng đã chốt. */
+#ReportSectionHeading {
+    color: #4F8EF7;                        /* --accent-primary */
+    font-size: 15px;
+    font-weight: 700;
+}
+
+#QuestionChip {
+    background-color: rgba(79, 142, 247, 0.12);  /* --accent-primary 12% opacity */
+    color: #4F8EF7;                               /* --accent-primary */
+    border-radius: 6px;                            /* --radius-sm */
+    padding: 1px 6px;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+/* Phase 3 Bước 3/4 — checkbox action item trong ReportDialog. Chỉ set màu
+   chữ + spacing (đồng bộ --text-primary) -- KHÔNG tự vẽ lại indicator
+   (ô vuông tick) bằng QSS tuỳ biến: rủi ro không tương thích/đổ vỡ trên
+   các bản Windows khác nhau cao hơn lợi ích thẩm mỹ nhỏ, indicator native
+   của Windows vốn đã hiện rõ trên nền tối. */
+QCheckBox#ActionItemCheckbox {
+    color: #E6E9EF;                        /* --text-primary */
+    spacing: 8px;
+    padding: 2px 0;
+}
+
+QPushButton#AskAiButton {
+    background-color: rgba(79, 142, 247, 0.10);   /* --accent-primary 10% opacity */
+    color: #4F8EF7;                                /* --accent-primary */
+    border: 1px solid #4F8EF7;
+    border-radius: 6px;                            /* --radius-sm */
+    padding: 3px 10px;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+QPushButton#AskAiButton:hover {
+    background-color: rgba(79, 142, 247, 0.20);
+}
+
+/* ---- Controls dưới cùng ---- */
+#ControlBar {
+    background-color: #131722;            /* --bg-surface */
+    border-top: 1px solid #232938;         /* --border-subtle */
+    padding: 8px;
+}
+
+QPushButton#PrimaryButton {
+    background-color: #4F8EF7;             /* --accent-primary */
+    color: #0B0E14;
+    border: none;
+    border-radius: 6px;                    /* --radius-sm */
+    padding: 8px 18px;
+    font-weight: 600;
+}
+
+QPushButton#PrimaryButton:hover {
+    background-color: #6FA3FF;             /* --accent-primary-hover */
+}
+
+QPushButton#PrimaryButton:disabled {
+    background-color: #232938;             /* --border-subtle */
+    color: #4D5566;                        /* --text-disabled */
+}
+
+QPushButton#DangerButton {
+    background-color: transparent;
+    color: #FF5470;                        /* --accent-recording */
+    border: 1px solid #FF5470;
+    border-radius: 6px;
+    padding: 8px 18px;
+    font-weight: 600;
+}
+
+QPushButton#DangerButton:hover {
+    background-color: rgba(255, 84, 112, 0.10);
+}
+
+QLabel#StatusLabel {
+    color: #8A93A6;                         /* --text-secondary */
+    font-size: 12px;
+}
+
+QLabel#StatusLabel[isError="true"] {
+    color: #F5A623;                         /* --accent-warning */
+}
+
+QComboBox {
+    background-color: #1A1F2E;              /* --bg-surface-alt */
+    color: #E6E9EF;
+    border: 1px solid #232938;
+    border-radius: 6px;
+    padding: 4px 8px;
+}
+
+QScrollBar:vertical {
+    background: #0B0E14;
+    width: 8px;
+}
+
+QScrollBar::handle:vertical {
+    background: #232938;                    /* --border-subtle */
+    border-radius: 4px;
+    min-height: 24px;
+}

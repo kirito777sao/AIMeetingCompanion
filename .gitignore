@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# Secrets — KHÔNG BAO GIỜ commit
+.env
+
+# Dữ liệu runtime local — không phải source code
+meetings.db
+*.db-journal
+*.db-wal
+
+# PyInstaller output
+build/
+dist/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Audio test thật nếu sau này bạn để vào
+test_audio/*.wav

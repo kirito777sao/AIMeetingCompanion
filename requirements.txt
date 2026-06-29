@@ -1,0 +1,53 @@
+# ==== Phase 0: audio capture + Groq Whisper test (script scripts/test_groq_whisper.py) ====
+soundcard>=0.4.3
+pyaudiowpatch>=0.2.12.6; sys_platform == "win32"
+numpy>=1.26.0
+python-dotenv>=1.0.1
+groq>=0.11.0
+
+# ==== Phase 1: VAD + AIProvider (Groq qua OpenAI-compatible SDK) + UI ====
+# BUG đã sửa: vad.py và groq_provider.py đã tồn tại từ trước nhưng các dòng
+# dưới đây bị thiếu trong requirements.txt -> `pip install -r requirements.txt`
+# rồi chạy app sẽ lỗi ModuleNotFoundError ngay lập tức. Đã verify bằng cách
+# cài trong venv sạch chỉ theo file này (xem báo cáo kiểm tra).
+#
+# Dùng `webrtcvad-wheels` (fork có wheel sẵn, cùng tên import `webrtcvad`,
+# KHÔNG cần sửa gì trong vad.py) thay vì package `webrtcvad` gốc (không cập
+# nhật từ 2017, dùng `import pkg_resources` -> lỗi ModuleNotFoundError trên
+# setuptools mới đã bỏ pkg_resources). Đã verify cả 2 trường hợp thật trong
+# venv sạch trước khi chốt dòng này.
+webrtcvad-wheels>=2.0.14
+openai>=1.40.0
+PySide6>=6.7.0
+
+# Các phase sau sẽ thêm: faster-whisper (Phase 4)
+
+# ==== Phase 3 Bước 3/4: xuất báo cáo .docx/.pdf (F11) ====
+# python-docx: pure Python, không cần MS Word cài sẵn để TẠO file (chỉ cần
+# Word/LibreOffice để MỞ file sau đó). reportlab: pure Python, không cần
+# binary hệ thống ngoài (khác weasyprint/wkhtmltopdf cần thêm GTK/Qt trên
+# Windows) -- xem app/report_export.py để biết lý do PHẢI tự register font
+# Unicode ("Segoe UI") trước khi vẽ PDF, nếu không dấu tiếng Việt sẽ lỗi.
+python-docx>=1.1.0
+reportlab>=4.0.0
+
+# ==== Vòng 6: Settings UI nhập API key (F14) ====
+# KHÔNG thêm dependency mới -- app/config_store.py dùng ctypes (stdlib,
+# luôn có sẵn) để gọi Windows DPAPI, không cần pywin32/keyring.
+
+# ==== MỚI: multi-provider (Groq/OpenAI/Gemini, F14 mở rộng — xem
+# CONTRACTS.md Mục 17) ====
+# OpenAIProvider dùng LẠI package `openai` đã có ở trên (chỉ đổi base_url
+# -- OpenAI chính chủ cũng dùng API shape giống Groq vì Groq host lại model
+# gốc của OpenAI). GeminiProvider dùng `openai` cho phần chat (Google có
+# lớp tương thích OpenAI) NHƯNG cần `httpx` TRỰC TIẾP cho transcribe() (REST
+# generateContent, Gemini không có endpoint audio.transcriptions tương
+# thích OpenAI -- xem docstring app/ai/gemini_provider.py).
+#
+# httpx vốn đã là dependency TRANSITIVE của `openai` (SDK openai dùng httpx
+# làm HTTP client nội bộ) -- khai báo TRỰC TIẾP ở đây thay vì ngầm dựa vào
+# transitive dependency, để KHÔNG bị vỡ nếu 1 bản `openai` tương lai đổi
+# HTTP client nội bộ (rủi ro nhỏ nhưng có thật khi pin version lỏng như
+# ">=").
+httpx>=0.27.0
+
