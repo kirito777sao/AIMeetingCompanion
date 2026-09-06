@@ -42,6 +42,7 @@ import time
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
     QComboBox,
+    QDialog,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -56,20 +57,28 @@ from app import report_export
 from app.ai.base_provider import ProviderError, SummaryResult
 from app.ai.provider_factory import create_provider
 from app.audio.capture import AudioCaptureError, AudioDeviceChangedError, stream_loopback_chunks
-from app.audio.vad import VadSegmenter
+from app.audio.vad import create_vad_segmenter_from_env
+from app.logging_setup import get_logger
 from app.pipeline import MeetingPipeline, TranscriptEvent
 from app.report import build_transcript_text
 from app.report_export import ReportExportError
 from app.storage.db import MeetingStore, ReportRecord, StorageError
 from app.ui.ai_worker import OneShotAIWorker
 from app.ui.ask_question_dialog import AskQuestionDialog
+from app.ui.audio_only_bubble import AudioOnlyBubble
+from app.ui.chat_dialog import ChatDialog
+from app.ui.help_dialog import HelpDialog
 from app.ui.history_dialog import MeetingHistoryDialog
+from app.ui.meeting_context_dialog import MeetingContextDialog
 from app.ui.report_view import ReportDialog
 from app.ui.settings_dialog import SettingsDialog
 from app.ui.suggestion_drawer import SuggestionDrawer
 from app.ui.transcript_bubble import TranscriptBubble
 
-_NATIVE_LANG_OPTIONS = [("vi", "Tiếng Việt"), ("en", "English"), ("zh", "中文")]
+_NATIVE_LANG_OPTIONS = [
+    ("vi", "Tiếng Việt"), ("en", "English"), ("zh", "中文"),
+    ("ja", "日本語"), ("ko", "한국어"),  # 🔒 MỚI (CONTRACTS.md Mục 22)
+]
 _DEFAULT_DB_PATH = "meetings.db"
 _CONTEXT_HISTORY_SIZE = 5  # số dòng transcript gần nhất đưa làm ngữ cảnh cho suggest_answer()
 # 🔒 MỚI -- giới hạn an toàn cho vòng tự-mở-lại stream khi gặp
@@ -77,6 +86,8 @@ _CONTEXT_HISTORY_SIZE = 5  # số dòng transcript gần nhất đưa làm ngữ
 # giữa (xem AudioWorker.run()) -- tránh treo thread vô hạn nếu rơi vào case
 # bệnh lý (lỗi nhận diện sai liên tục).
 _MAX_CONSECUTIVE_DEVICE_RETRIES = 5
+
+_logger = get_logger()  # 🔒 MỚI (Backlog #3, CONTRACTS.md Mục 30)
 
 
 class AudioWorker(QThread):
@@ -88,10 +99,27 @@ class AudioWorker(QThread):
     error_occurred = Signal(str)            # message lỗi hiển thị cho người dùng
     finished_recording = Signal()
 
-    def __init__(self, user_native_lang: str, db_path: str = _DEFAULT_DB_PATH, parent=None):
+    def __init__(
+        self,
+        user_native_lang: str,
+        db_path: str = _DEFAULT_DB_PATH,
+        meeting_context: str = "",
+        language_hint: str = "",
+        parent=None,
+    ):
         super().__init__(parent)
         self._user_native_lang = user_native_lang
         self._db_path = db_path
+        # 🔒 MỚI (CONTRACTS.md Mục 38) — "" = "Tự động" (mặc định, giữ
+        # nguyên hành vi cũ). Xem AIProvider.transcribe() docstring.
+        self._language_hint = language_hint
+        # 🔒 MỚI (Vòng 9, CONTRACTS.md Mục 18) — bối cảnh TĨNH người dùng tự
+        # nhập ở MeetingContextDialog trước khi bấm "Bắt đầu ghi". Chỉ dùng
+        # để LƯU vào DB (start_meeting()) ở đây — suggest_answer() lại đọc
+        # meeting_context từ MainWindow._current_meeting_context (giữ trên
+        # main thread), KHÔNG đọc lại từ đây, vì suggest_answer() chạy qua
+        # OneShotAIWorker riêng, không qua AudioWorker này (xem ai_worker.py).
+        self._meeting_context = meeting_context
         self._stop_event = threading.Event()
 
     def request_stop(self) -> None:
@@ -105,25 +133,31 @@ class AudioWorker(QThread):
         try:
             provider = create_provider()  # đọc provider+key đang dùng (Settings UI hoặc .env khi dev — xem provider_factory.py)
         except ProviderError as exc:
+            _logger.error("Không khởi tạo được AI provider: %s", exc)
             self.error_occurred.emit(f"Không khởi tạo được AI provider: {exc}")
             self.finished_recording.emit()
             return
 
         try:
             store = MeetingStore(self._db_path)  # tạo trên CHÍNH worker thread này
-            meeting_id = store.start_meeting(self._user_native_lang)
+            meeting_id = store.start_meeting(self._user_native_lang, self._meeting_context)
         except StorageError as exc:
+            _logger.error("Không tạo được phiên họp trong database: %s", exc)
             self.error_occurred.emit(f"Không tạo được phiên họp trong database: {exc}")
             self.finished_recording.emit()
             return
 
+        _logger.info("Bắt đầu phiên họp mới (meeting_id=%s)", meeting_id)
         self.meeting_started.emit(meeting_id)
 
-        segmenter = VadSegmenter(samplerate=16000)
+        # 🔒 MỚI (Mục 27) -- đọc override qua .env (VAD_AGGRESSIVENESS,
+        # VAD_SILENCE_MS, ...) thay vì hardcode cứng, xem
+        # app/audio/vad.py::create_vad_segmenter_from_env().
+        segmenter = create_vad_segmenter_from_env(samplerate=16000)
         pipeline = MeetingPipeline(
             segmenter=segmenter, provider=provider, store=store,
             meeting_id=meeting_id, user_native_lang=self._user_native_lang,
-            samplerate=16000,
+            samplerate=16000, language_hint=self._language_hint,
         )
 
         try:
@@ -166,6 +200,10 @@ class AudioWorker(QThread):
                     # được nữa) thay vì xoay vòng vô hạn treo thread.
                     device_change_retry_count += 1
                     if device_change_retry_count > _MAX_CONSECUTIVE_DEVICE_RETRIES:
+                        _logger.error(
+                            "Thiết bị âm thanh đổi liên tục %s lần (meeting_id=%s) -- "
+                            "dừng tự động mở lại.", device_change_retry_count, meeting_id,
+                        )
                         self.error_occurred.emit(
                             "Thiết bị phát âm thanh đổi liên tục nhiều lần "
                             "bất thường -- đã dừng tự động mở lại để tránh "
@@ -176,6 +214,7 @@ class AudioWorker(QThread):
                     time.sleep(0.5)  # tránh xoay vòng dồn dập nếu lỗi lặp lại ngay
                     continue
         except AudioCaptureError as exc:
+            _logger.error("Lỗi capture audio (meeting_id=%s): %s", meeting_id, exc)
             self.error_occurred.emit(str(exc))
 
         # Dù dừng do người dùng bấm Stop hay do lỗi audio giữa chừng, vẫn cố
@@ -185,10 +224,12 @@ class AudioWorker(QThread):
             if flushed is not None:
                 self.new_event.emit(flushed)
         except Exception as exc:  # noqa: BLE001 - không để lỗi flush làm mất phiên đã ghi
+            _logger.error("Lỗi khi xử lý đoạn nói cuối (meeting_id=%s): %s", meeting_id, exc, exc_info=True)
             self.error_occurred.emit(f"Lỗi khi xử lý đoạn nói cuối: {exc}")
 
         pipeline.close()
         store.close()
+        _logger.info("Kết thúc phiên họp (meeting_id=%s)", meeting_id)
         self.finished_recording.emit()
 
 
@@ -201,6 +242,11 @@ class MainWindow(QMainWindow):
         self._worker: AudioWorker | None = None
         self._current_meeting_id: int | None = None
         self._current_native_lang: str = "vi"
+        # 🔒 MỚI (Vòng 9, CONTRACTS.md Mục 18) — bối cảnh TĨNH của phiên họp
+        # hiện tại, đọc 1 lần từ MeetingContextDialog lúc bấm "Bắt đầu ghi",
+        # dùng lại cho MỌI lần bấm "Nhờ AI trả lời" trong suốt phiên (xem
+        # _start_suggest_worker). "" nghĩa là người dùng không nhập/bỏ qua.
+        self._current_meeting_context: str = ""
 
         # Phase 2: ngữ cảnh gần nhất cho suggest_answer() + giữ tham chiếu
         # các OneShotAIWorker đang chạy (QThread bị garbage-collect giữa
@@ -211,6 +257,33 @@ class MainWindow(QMainWindow):
         self._recent_source_langs: list[str] = []
         self._ai_workers: list[OneShotAIWorker] = []
         self._last_error_in_session: str | None = None
+        # 🔒 MỚI (CONTRACTS.md Mục 21) — "Hỏi AI": giữ ĐÚNG 1 instance dialog
+        # (khác SuggestionDrawer có thể mở nhiều cái cùng lúc), tạo lười
+        # (lazy) ở lần bấm nút đầu tiên, để lịch sử hội thoại giữ liên tục
+        # suốt phiên làm việc thay vì mất khi đóng/mở lại.
+        self._chat_dialog: ChatDialog | None = None
+        # 🔒 MỚI (Mục 34 -- yêu cầu người dùng) -- CÙNG pattern singleton như
+        # `_chat_dialog` ở trên, áp dụng thêm cho Cài đặt/Lịch sử/Tôi muốn
+        # hỏi/Xem báo cáo: nhấn đúp hoặc nhấn nhiều lần liên tiếp vào 1 nút
+        # trước đây tạo ra NHIỀU cửa sổ chồng lên nhau (mỗi lần bấm là 1
+        # `QDialog` mới + `.show()`) -- rất bất tiện. Từ nay mỗi loại dialog
+        # chỉ giữ ĐÚNG 1 instance đang sống; bấm thêm lần nữa chỉ
+        # show()+raise_()+activateWindow() lại CHÍNH cửa sổ đó thay vì tạo
+        # mới. Các dialog này KHÔNG bật `Qt.WA_DeleteOnClose` (đóng bằng X/
+        # Esc chỉ ẩn đi, không huỷ instance) nên việc tái sử dụng an toàn --
+        # đúng tiền lệ đã có sẵn của `_chat_dialog` (Mục 21), không phải kỹ
+        # thuật mới trong dự án.
+        self._settings_dialog: SettingsDialog | None = None
+        self._help_dialog: HelpDialog | None = None
+        self._history_dialog: MeetingHistoryDialog | None = None
+        self._ask_question_dialog: AskQuestionDialog | None = None
+        # meeting_id -> ReportDialog đang mở cho ĐÚNG phiên đó -- report có
+        # trạng thái riêng theo TỪNG phiên họp (khác Settings/Lịch sử/Tôi
+        # muốn hỏi chỉ cần 1 instance chung), nên khoá theo meeting_id thay
+        # vì 1 biến duy nhất: xem báo cáo phiên #3 xong rồi xem phiên #5
+        # vẫn là 2 cửa sổ khác nhau hợp lý (không phải "trùng"), CHỈ chặn
+        # trùng khi bấm lại ĐÚNG PHIÊN đang mở sẵn.
+        self._report_dialogs: dict[int, ReportDialog] = {}
 
         root = QWidget()
         root_layout = QVBoxLayout(root)
@@ -269,37 +342,51 @@ class MainWindow(QMainWindow):
         control_layout.addLayout(row1)
 
         row2 = QHBoxLayout()
-        self._start_button = QPushButton("Bắt đầu ghi")
+        # 🔒 MỚI (Mục 32 -- yêu cầu người dùng) -- mỗi nút cơ bản có 1 chữ cái
+        # mnemonic riêng (dấu &), cho phép thao tác THUẦN BÀN PHÍM: Alt+chữ
+        # cái để kích hoạt nút mà KHÔNG cần chuột (vd Alt+B = Bắt đầu ghi),
+        # kết hợp Tab/Shift+Tab để di chuyển giữa các nút + Enter/Space để
+        # bấm nút đang focus (hành vi mặc định sẵn có của QPushButton, không
+        # cần code thêm). 8 chữ cái B/K/T/X/L/A/C/G (thêm G ở Mục 37) KHÔNG
+        # trùng nhau trong cùng cửa sổ chính -- Qt sẽ báo lỗi/mnemonic không
+        # hoạt động đúng nếu 2 nút cùng cửa sổ trùng chữ cái, nên khi thêm
+        # nút MỚI ở đây về sau PHẢI chọn chữ cái còn trống (xem danh sách đã
+        # dùng ngay trên mỗi nút bên dưới) hoặc bỏ mnemonic cho nút đó.
+        self._start_button = QPushButton("&Bắt đầu ghi")  # Alt+B
         self._start_button.setObjectName("PrimaryButton")
+        self._start_button.setToolTip("Bắt đầu ghi âm cuộc họp mới. (Alt+B)")
         self._start_button.clicked.connect(self._on_start_clicked)
         row2.addWidget(self._start_button)
 
-        self._stop_button = QPushButton("Kết thúc họp")
+        self._stop_button = QPushButton("&Kết thúc họp")  # Alt+K
         self._stop_button.setObjectName("DangerButton")
         self._stop_button.setEnabled(False)
+        self._stop_button.setToolTip("Kết thúc phiên họp đang ghi. (Alt+K)")
         self._stop_button.clicked.connect(self._on_stop_clicked)
         row2.addWidget(self._stop_button)
 
-        self._ask_question_button = QPushButton("❓ Tôi muốn hỏi")
+        self._ask_question_button = QPushButton("❓ &Tôi muốn hỏi")  # Alt+T
         self._ask_question_button.setObjectName("AskAiButton")
         self._ask_question_button.setEnabled(False)  # chỉ bật khi đang có phiên họp
         self._ask_question_button.setToolTip(
             "Nhập câu bạn muốn hỏi/đặt vấn đề bằng tiếng mẹ đẻ, dịch sang "
-            "ngôn ngữ đối phương để chủ động hỏi lại — không chỉ ngồi đợi bị hỏi."
+            "ngôn ngữ đối phương để chủ động hỏi lại — không chỉ ngồi đợi bị hỏi. "
+            "(Alt+T)"
         )
         self._ask_question_button.clicked.connect(self._on_ask_question_clicked)
         row2.addWidget(self._ask_question_button)
 
-        self._report_button = QPushButton("📄 Xem báo cáo")
+        self._report_button = QPushButton("📄 &Xem báo cáo")  # Alt+X
         self._report_button.setObjectName("AskAiButton")
         self._report_button.setEnabled(False)  # chỉ bật khi đã có phiên họp (start/end đều dùng được)
         self._report_button.setToolTip(
-            "Tổng hợp tóm tắt + quyết định + việc cần làm của phiên họp này bằng AI."
+            "Tổng hợp tóm tắt + quyết định + việc cần làm của phiên họp này bằng AI. "
+            "(Alt+X)"
         )
         self._report_button.clicked.connect(self._on_report_clicked)
         row2.addWidget(self._report_button)
 
-        self._history_button = QPushButton("🕓 Lịch sử")
+        self._history_button = QPushButton("🕓 &Lịch sử")  # Alt+L
         self._history_button.setObjectName("AskAiButton")
         # 🔒 MỚI (F13) -- CỐ TÌNH luôn bật, KHÔNG gate theo _current_meeting_id
         # như _report_button -- đây chính là sửa lỗi thật "không xem được
@@ -307,16 +394,40 @@ class MainWindow(QMainWindow):
         # chưa/không đang ghi âm gì trong session hiện tại.
         self._history_button.setToolTip(
             "Xem/tìm lại các phiên họp đã ghi trước đây, kể cả khi không "
-            "đang ghi âm gì ngay lúc này."
+            "đang ghi âm gì ngay lúc này. (Alt+L)"
         )
         self._history_button.clicked.connect(self._on_history_clicked)
         row2.addWidget(self._history_button)
 
-        self._settings_button = QPushButton("⚙️ Cài đặt")
+        self._chat_button = QPushButton("💬 Hỏi &AI")  # Alt+A
+        self._chat_button.setObjectName("AskAiButton")
+        # 🔒 MỚI (CONTRACTS.md Mục 21) — CỐ Ý luôn bật, KHÔNG gate theo
+        # meeting_started (khác _ask_question_button/_report_button) —
+        # đây là trợ lý kiến thức chung, không phụ thuộc đang có phiên họp
+        # hay không, cùng tinh thần với _history_button (Mục 13).
+        self._chat_button.setToolTip(
+            "Hỏi-đáp tự do với AI (dùng kiến thức có sẵn, không tra cứu web). "
+            "(Alt+A)"
+        )
+        self._chat_button.clicked.connect(self._on_chat_clicked)
+        row2.addWidget(self._chat_button)
+
+        self._settings_button = QPushButton("⚙️ &Cài đặt")  # Alt+C
         self._settings_button.setObjectName("AskAiButton")
-        self._settings_button.setToolTip("Nhập/đổi Groq API key của bạn.")
+        self._settings_button.setToolTip("Nhập/đổi API key của bạn. (Alt+C)")
         self._settings_button.clicked.connect(self._on_settings_clicked)
         row2.addWidget(self._settings_button)
+
+        # 🔒 MỚI (Mục 37 -- yêu cầu người dùng, phản hồi test thật: "không
+        # biết nhấn phím/tổ hợp phím nào") -- gom toàn bộ phím tắt + quy
+        # trình dùng cơ bản vào 1 dialog mở được ngay từ đây.
+        self._help_button = QPushButton("❓ Trợ &Giúp")  # Alt+G
+        self._help_button.setObjectName("AskAiButton")
+        self._help_button.setToolTip(
+            "Xem danh sách phím tắt (Alt+...) và quy trình dùng cơ bản. (Alt+G)"
+        )
+        self._help_button.clicked.connect(self._on_help_clicked)
+        row2.addWidget(self._help_button)
 
         row2.addStretch(1)
         control_layout.addLayout(row2)
@@ -331,8 +442,35 @@ class MainWindow(QMainWindow):
     # -- UI handlers -------------------------------------------------------
 
     def _on_start_clicked(self) -> None:
+        # 🔒 MỚI (Vòng 9, CONTRACTS.md Mục 18) — hỏi bối cảnh cuộc họp
+        # TRƯỚC khi làm bất kỳ thay đổi trạng thái nào (reset list, disable
+        # nút, tạo AudioWorker) — nếu người dùng bấm "Huỷ" ở dialog này,
+        # màn hình chính phải giữ NGUYÊN như chưa bấm gì, không được nửa
+        # vời (vd đã disable nút "Bắt đầu ghi" nhưng chưa có worker nào chạy).
+        #
+        # Tách riêng phần "hỏi bối cảnh" (ở đây) khỏi phần "thật sự bắt đầu
+        # ghi" (_start_recording() bên dưới) CÓ CHỦ Ý: _start_recording()
+        # cần tự test được KHÔNG phải tự động click qua 1 QDialog.exec()
+        # modal thật (tests/test_ui_smoke.py gọi thẳng _start_recording()
+        # với meeting_context="" để giữ nguyên hành vi test cũ — xem
+        # docstring _start_recording()).
+        context_dialog = MeetingContextDialog(parent=self)
+        if context_dialog.exec() != QDialog.Accepted:
+            return
+        self._start_recording(context_dialog.context_text(), context_dialog.language_hint())
+
+    def _start_recording(self, meeting_context: str, language_hint: str = "") -> None:
+        """Thật sự khởi động 1 phiên ghi âm mới — tách riêng khỏi
+        `_on_start_clicked()` (xem lý do ở đó) để test được KHÔNG cần đi
+        qua `MeetingContextDialog` modal thật (tests/test_ui_smoke.py gọi
+        `window._start_recording("")` thay cho `window._on_start_clicked()`
+        cũ — hành vi bên trong hàm này GIỮ NGUYÊN 100% so với thân hàm
+        `_on_start_clicked()` trước Vòng 9). `language_hint` (🔒 MỚI, Mục
+        38) optional, mặc định "" ("Tự động") — test cũ gọi 1 tham số vẫn
+        hoạt động y hệt trước."""
         native_lang = self._lang_combo.currentData()
         self._current_native_lang = native_lang
+        self._current_meeting_context = meeting_context
         self._recent_originals = []  # reset ngữ cảnh cho phiên họp mới
         self._recent_source_langs = []
         self._last_error_in_session = None
@@ -340,7 +478,10 @@ class MainWindow(QMainWindow):
         self._report_button.setEnabled(False)  # tránh dùng nhầm meeting_id CŨ trong lúc chờ meeting_started
         self._set_status("Đang khởi động...", is_error=False)
 
-        self._worker = AudioWorker(user_native_lang=native_lang)
+        self._worker = AudioWorker(
+            user_native_lang=native_lang, meeting_context=meeting_context,
+            language_hint=language_hint,
+        )
         self._worker.meeting_started.connect(self._on_meeting_started)
         self._worker.new_event.connect(self._on_new_event)
         self._worker.error_occurred.connect(self._on_worker_error)
@@ -362,6 +503,18 @@ class MainWindow(QMainWindow):
         self._set_status(f"Đang ghi âm — phiên họp #{meeting_id}.", is_error=False)
 
     def _on_new_event(self, event: TranscriptEvent) -> None:
+        if event.is_audio_only:
+            # 🔒 MỚI (CONTRACTS.md Mục 23) — audio thật nhưng không phải
+            # giọng nói (nhạc không lời/tạp âm) -- hiện indicator NHẸ, KHÔNG
+            # tạo TranscriptBubble (không có original_text/translated_text
+            # thật), KHÔNG cập nhật _recent_originals/_recent_source_langs
+            # (không phải 1 câu nói thật, không nên lẫn vào ngữ cảnh cho
+            # suggest_answer()/translate() sau này).
+            indicator = AudioOnlyBubble()
+            if self._is_scrolled_to_bottom():
+                self._pending_autoscroll = True
+            self._transcript_layout.insertWidget(self._transcript_layout.count() - 1, indicator)
+            return
         if event.original_text:
             # Lấy context TRƯỚC khi thêm event hiện tại vào lịch sử -- snapshot
             # này gắn cố định vào bubble (xem TranscriptBubble docstring), để
@@ -440,10 +593,17 @@ class MainWindow(QMainWindow):
     def _start_suggest_worker(self, question_text: str, context_text: str, drawer: SuggestionDrawer) -> None:
         drawer.set_loading()
         native_lang = self._current_native_lang
+        # 🔒 MỚI (Vòng 9, CONTRACTS.md Mục 18) — đọc trên main thread (chỉ
+        # đọc 1 str), truyền vào closure, cùng quy ước với native_lang ở
+        # trên -- KHÔNG đọc self._current_meeting_context từ bên trong
+        # action() (đang chạy ở thread khác lúc đó).
+        meeting_context = self._current_meeting_context
 
         def action() -> str:
             provider = create_provider()  # instance riêng cho thread này (xem ai_worker.py)
-            return provider.suggest_answer(question_text, context_text, native_lang)
+            return provider.suggest_answer(
+                question_text, context_text, native_lang, meeting_context=meeting_context
+            )
 
         worker = OneShotAIWorker(action)
         worker.succeeded.connect(drawer.set_answer)
@@ -525,11 +685,20 @@ class MainWindow(QMainWindow):
 
     def _on_ask_question_clicked(self) -> None:
         default_target_lang = self._guess_other_party_lang()
-        dialog = AskQuestionDialog(default_target_lang=default_target_lang, parent=self)
-        dialog.translate_requested.connect(
-            lambda text, target_lang: self._start_ask_translate_worker(text, target_lang, dialog)
-        )
-        dialog.show()
+        if self._ask_question_dialog is None:
+            dialog = AskQuestionDialog(default_target_lang=default_target_lang, parent=self)
+            dialog.translate_requested.connect(
+                lambda text, target_lang: self._start_ask_translate_worker(text, target_lang, dialog)
+            )
+            self._ask_question_dialog = dialog
+        else:
+            # Dialog tái dùng (Mục 34) -- vẫn làm mới lại "đoán ngôn ngữ đối
+            # phương" mỗi lần mở, vì đây là suy đoán phụ thuộc transcript
+            # gần nhất, có thể đã đổi từ lần mở dialog trước.
+            self._ask_question_dialog.set_default_target_lang(default_target_lang)
+        self._ask_question_dialog.show()
+        self._ask_question_dialog.raise_()
+        self._ask_question_dialog.activateWindow()
 
     def _guess_other_party_lang(self) -> str:
         """Đoán ngôn ngữ đối phương đang dùng = ngôn ngữ KHÁC tiếng mẹ đẻ
@@ -574,13 +743,86 @@ class MainWindow(QMainWindow):
         self._open_report_for_meeting(meeting_id, self._current_native_lang)
 
     def _on_history_clicked(self) -> None:
-        dialog = MeetingHistoryDialog(_DEFAULT_DB_PATH, parent=self)
-        dialog.report_requested.connect(self._open_report_for_meeting)
-        dialog.show()
+        # 🔒 SỬA (bugfix sau phản hồi test thật) -- TRƯỚC ĐÂY dùng thẳng
+        # `self._current_meeting_id` để báo cho dialog Lịch sử biết phiên
+        # nào "đang ghi âm cần khoá không cho xoá". SAI: `_current_meeting_id`
+        # KHÔNG được reset về None trong `_on_worker_finished()` (cố ý, để
+        # nút "📄 Xem báo cáo" vẫn dùng được ngay sau khi bấm "Kết thúc họp"
+        # -- xem comment dòng 375). Hệ quả: phiên VỪA kết thúc vẫn bị
+        # `_MeetingRow` coi là `is_protected=True` mãi mãi (cho tới khi bắt
+        # đầu phiên ghi mới) -- checkbox của nó bị khoá, "Chọn tất cả" bỏ
+        # qua nó, xoá "tất cả" không xoá được phiên mới nhất, và vì DB vẫn
+        # còn ÍT NHẤT 1 dòng nên `sqlite_sequence` không bao giờ được reset
+        # (xem `MeetingStore.delete_meetings()`) -- lỗi thật người dùng báo
+        # lại đúng khớp cơ chế này.
+        #
+        # SỬA: chỉ coi là "đang ghi, cần khoá" khi có `self._worker` SỐNG
+        # THẬT (AudioWorker) -- đúng tín hiệu "đang ghi", khác với
+        # "_current_meeting_id vẫn còn nhớ phiên gần nhất để Xem báo cáo".
+        # `self._worker` được set None ngay trong `_on_worker_finished()`
+        # (dòng 950) nên tại thời điểm này nó phản ánh đúng trạng thái.
+        protected_meeting_id = self._current_meeting_id if self._worker is not None else None
+        if self._history_dialog is None:
+            dialog = MeetingHistoryDialog(
+                _DEFAULT_DB_PATH, current_meeting_id=protected_meeting_id, parent=self,
+            )
+            dialog.report_requested.connect(self._open_report_for_meeting)
+            self._history_dialog = dialog
+        else:
+            # 🔒 MỚI (Mục 34) -- dialog tái dùng: phiên "đang ghi" có thể đã
+            # đổi (vd đã dừng ghi/bắt đầu phiên mới) từ lần mở trước --
+            # refresh() vừa cập nhật lại phiên "được bảo vệ" vừa tải lại
+            # danh sách mới nhất (id/báo cáo có thể vừa được thêm/xoá).
+            self._history_dialog.refresh(protected_meeting_id)
+        self._history_dialog.show()
+        self._history_dialog.raise_()
+        self._history_dialog.activateWindow()
 
     def _on_settings_clicked(self) -> None:
-        dialog = SettingsDialog(parent=self)
-        dialog.show()
+        if self._settings_dialog is None:
+            self._settings_dialog = SettingsDialog(parent=self)
+        self._settings_dialog.show()
+        self._settings_dialog.raise_()
+        self._settings_dialog.activateWindow()
+
+    def _on_help_clicked(self) -> None:
+        # 🔒 MỚI (Mục 37) -- singleton, cùng pattern với _on_settings_clicked
+        # ở trên. Dialog TĨNH (xem docstring HelpDialog), không cần refresh().
+        if self._help_dialog is None:
+            self._help_dialog = HelpDialog(parent=self)
+        self._help_dialog.show()
+        self._help_dialog.raise_()
+        self._help_dialog.activateWindow()
+
+    # -- "Hỏi AI": chat tự do đa lượt (CONTRACTS.md Mục 21) -----------------
+
+    def _on_chat_clicked(self) -> None:
+        if self._chat_dialog is None:
+            self._chat_dialog = ChatDialog(parent=self)
+            self._chat_dialog.message_sent.connect(self._on_chat_message_sent)
+        self._chat_dialog.show()
+        self._chat_dialog.raise_()
+        self._chat_dialog.activateWindow()
+
+    def _on_chat_message_sent(self) -> None:
+        dialog = self._chat_dialog
+        if dialog is None:
+            return  # phòng vệ — signal chỉ emit từ dialog đang tồn tại
+        # Đọc trên MAIN THREAD (xem docstring snapshot_messages()) rồi
+        # truyền bản sao vào closure — cùng quy ước với native_lang/
+        # meeting_context ở _start_suggest_worker().
+        messages = dialog.snapshot_messages()
+        native_lang = self._current_native_lang
+
+        def action() -> str:
+            provider = create_provider()  # instance riêng cho thread này (xem ai_worker.py)
+            return provider.chat(messages, native_lang)
+
+        worker = OneShotAIWorker(action)
+        worker.succeeded.connect(dialog.set_answer)
+        worker.failed.connect(dialog.set_error)
+        self._register_worker(worker)
+        worker.start()
 
     def _open_report_for_meeting(self, meeting_id: int, native_lang: str) -> None:
         """🔒 MỚI (F13) -- tách ra từ `_on_report_clicked()` cũ để dùng
@@ -592,6 +834,20 @@ class MainWindow(QMainWindow):
         trị này có thể KHÁC nhau, vd người dùng đổi ngôn ngữ mẹ đẻ giữa các
         lần dùng app, hoặc đang xem lịch sử mà không có phiên nào đang chạy).
         """
+        # 🔒 MỚI (Mục 34) -- chặn mở TRÙNG cửa sổ báo cáo của ĐÚNG 1 phiên
+        # họp (vd nhấn đúp nút "Xem báo cáo", hoặc bấm "Xem báo cáo" trong
+        # Lịch sử 2 lần liên tiếp cho cùng 1 dòng): nếu đã có dialog đang mở
+        # cho `meeting_id` này, chỉ raise/activate lại nó, KHÔNG gọi lại
+        # AI/tạo report mới (tránh tốn API call vô ích + tránh nhấp nháy nội
+        # dung đang hiển thị). Xem báo cáo của 2 phiên KHÁC NHAU vẫn mở 2
+        # cửa sổ riêng biệt bình thường -- đó không phải "trùng".
+        existing = self._report_dialogs.get(meeting_id)
+        if existing is not None:
+            existing.show()
+            existing.raise_()
+            existing.activateWindow()
+            return
+
         dialog = ReportDialog(meeting_id, parent=self)
         dialog._native_lang_for_export = native_lang  # xem _on_export_requested()
         dialog.retry_requested.connect(
@@ -604,6 +860,8 @@ class MainWindow(QMainWindow):
             lambda index, done: self._on_action_item_toggled(meeting_id, index, done, dialog)
         )
         dialog.export_requested.connect(lambda fmt: self._on_export_requested(fmt, dialog))
+        self._report_dialogs[meeting_id] = dialog
+        dialog.finished.connect(lambda _result, mid=meeting_id: self._report_dialogs.pop(mid, None))
         dialog.show()
         self._start_report_worker(meeting_id, dialog, force_regenerate=False, native_lang=native_lang)
 

@@ -25,6 +25,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from app.ui.skeleton_loader import SkeletonLoadingWidget
+
 
 class SuggestionDrawer(QDialog):
     """Không-modal (show(), không exec()) để transcript phía sau vẫn tiếp
@@ -59,6 +61,14 @@ class SuggestionDrawer(QDialog):
         self._answer_edit.setPlaceholderText("Đang soạn gợi ý...")
         layout.addWidget(self._answer_edit, stretch=1)
 
+        # 🔒 MỚI (Backlog "Skeleton loading") -- hiện thay cho _answer_edit
+        # TRONG lúc đang chờ AI soạn gợi ý (set_loading()), ẩn lại khi có
+        # kết quả/lỗi. Cùng vị trí + cùng stretch=1 trong layout để không
+        # đổi kích thước dialog lúc chuyển qua lại.
+        self._skeleton = SkeletonLoadingWidget()
+        self._skeleton.setVisible(False)
+        layout.addWidget(self._skeleton, stretch=1)
+
         self._status_label = QLabel("")
         self._status_label.setObjectName("StatusLabel")
         layout.addWidget(self._status_label)
@@ -90,17 +100,23 @@ class SuggestionDrawer(QDialog):
         self._answer_edit.setReadOnly(True)
         self._answer_edit.clear()
         self._answer_edit.setPlaceholderText("Đang soạn gợi ý...")
+        self._answer_edit.setVisible(False)  # 🔒 MỚI -- nhường chỗ cho skeleton
+        self._skeleton.setVisible(True)
         self._translate_button.setEnabled(False)
         self._status_label.setText("")
         self._readback_label.setVisible(False)
 
     def set_answer(self, text: str) -> None:
+        self._skeleton.setVisible(False)  # 🔒 MỚI
+        self._answer_edit.setVisible(True)
         self._answer_edit.setReadOnly(False)
         self._answer_edit.setPlainText(text)
         self._translate_button.setEnabled(True)
         self._status_label.setText("")
 
     def set_error(self, message: str) -> None:
+        self._skeleton.setVisible(False)  # 🔒 MỚI
+        self._answer_edit.setVisible(True)
         self._status_label.setText(message)
         self._status_label.setProperty("isError", True)
         self._status_label.style().unpolish(self._status_label)

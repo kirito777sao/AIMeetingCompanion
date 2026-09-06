@@ -43,11 +43,16 @@ from app.ai.base_provider import ProviderError, TranscriptionResult
 from app.ai.openai_compat_base import (  # noqa: F401 - re-export cho test cũ
     OpenAICompatProvider,
     _auth_error_hint,
-    _call_with_rate_limit_fallback,
+    _call_with_fallback,
     _coerce_to_string_list,
+    _DEFAULT_CLIENT_TIMEOUT_SECONDS,
     _language_name,
     _looks_like_wrong_script,
+    _resolve_client_timeout_seconds,
+    _retry_with_backoff,
     _script_char_counts,
+    _sleep_backoff,
+    _TRANSIENT_NETWORK_MAX_RETRIES,
 )
 from app.ai.whisper_utils import (  # noqa: F401 - re-export cho test cũ
     _WHISPER_NAME_TO_ISO,
@@ -77,8 +82,22 @@ class GroqProvider(OpenAICompatProvider):
       phản hồi test "nghe sai/sót từ"); fallback `whisper-large-v3-turbo`
       CHỈ KHI gặp 429 (hết quota free tier ở model đầy đủ ngay lúc đó).
     - Chat (translate/suggest_answer/summarize): ưu tiên
-      `llama-3.3-70b-versatile`; fallback `llama-3.1-8b-instant` CHỈ KHI
-      429.
+      `openai/gpt-oss-120b`; fallback `openai/gpt-oss-20b` CHỈ KHI 429.
+
+    🔒 SỬA (02/09/2026, phát hiện từ log lỗi thật của người dùng — KHÔNG
+    thuộc phạm vi Vòng 9/Mục 18, sửa riêng vì chặn cả translate/
+    suggest_answer/summarize hoàn toàn): Groq đã **decommission**
+    `llama-3.3-70b-versatile` VÀ `llama-3.1-8b-instant` từ 16/08/2026 (thông
+    báo từ 17/06/2026, xem https://console.groq.com/docs/deprecations) —
+    gọi 2 model này giờ trả lỗi 404 `model_not_found` cho MỌI request, kể cả
+    API key hợp lệ (dễ nhầm là lỗi API key vì message không rõ ràng — xem
+    log người dùng gửi: STT vẫn chạy tốt qua Whisper, chỉ chat model lỗi).
+    Đổi default sang model Groq khuyến nghị thay thế: `openai/gpt-oss-120b`
+    (thay `llama-3.3-70b-versatile`) và `openai/gpt-oss-20b` (thay
+    `llama-3.1-8b-instant`) — cả 2 đều nằm trong danh sách khuyến nghị
+    chính thức của Groq. CHƯA tự test THẬT với API key thật trong sandbox
+    này (không có mạng ra ngoài tới Groq) — cần bạn xác nhận lại 2 model
+    mới hoạt động đúng trên máy bạn.
     """
 
     _provider_label = "Groq"
@@ -91,10 +110,11 @@ class GroqProvider(OpenAICompatProvider):
     def __init__(
         self,
         api_key: str | None = None,
-        stt_model: str = "whisper-large-v3",
-        stt_fallback_model: str = "whisper-large-v3-turbo",
-        translate_model: str = "llama-3.3-70b-versatile",
-        translate_fallback_model: str = "llama-3.1-8b-instant",
+        stt_model: str | None = None,
+        stt_fallback_model: str | None = None,
+        translate_model: str | None = None,
+        translate_fallback_model: str | None = None,
+        client_timeout_seconds: float | None = None,
     ) -> None:
         """Khởi tạo provider, kết nối tới Groq qua SDK OpenAI-compatible.
 
@@ -109,18 +129,37 @@ class GroqProvider(OpenAICompatProvider):
                 tại của bạn đang dùng, VẪN hoạt động bình thường, không bị
                 thay thế) — chỉ dùng khi config_store chưa lưu gì (vd vừa
                 đóng gói lần đầu).
-            stt_model: Model STT ưu tiên, mặc định "whisper-large-v3" (đầy
-                đủ, chính xác hơn turbo).
-            stt_fallback_model: Model STT dự phòng, dùng tự động khi
-                `stt_model` bị Groq trả 429 (hết quota free tier ngay lúc
-                đó) — mặc định "whisper-large-v3-turbo". Đặt "" hoặc bằng
-                `stt_model` để TẮT fallback (lỗi 429 sẽ raise thẳng).
-            translate_model: Model dịch/sinh text ưu tiên, mặc định
-                "llama-3.3-70b-versatile".
-            translate_fallback_model: Model dự phòng cho translate()/
-                suggest_answer()/summarize(), dùng tự động khi
-                `translate_model` bị 429 — mặc định "llama-3.1-8b-instant".
-                Đặt "" hoặc bằng `translate_model` để TẮT fallback.
+            stt_model / stt_fallback_model / translate_model /
+                translate_fallback_model: 🔒 SỬA (02/09/2026, CONTRACTS.md
+                Mục 19) — GIỮ NGUYÊN Ý NGHĨA như trước (model STT/chat ưu
+                tiên + dự phòng khi 429/404), nhưng đổi default từ hardcode
+                CỨNG sang **3 tầng ưu tiên**: (1) tham số truyền trực tiếp
+                khi gọi hàm này (kể cả `""` để TẮT fallback — GIỮ NGUYÊN
+                hành vi cũ) > (2) biến môi trường tương ứng
+                (`GROQ_STT_MODEL`, `GROQ_STT_FALLBACK_MODEL`,
+                `GROQ_TRANSLATE_MODEL`, `GROQ_TRANSLATE_FALLBACK_MODEL`
+                trong `.env`) > (3) hardcode mặc định trong code
+                (`"whisper-large-v3"`, `"whisper-large-v3-turbo"`,
+                `"openai/gpt-oss-120b"`, `"openai/gpt-oss-20b"`).
+                **Lý do thêm tầng (2)**: đây là lần THỨ 2 Groq decommission
+                model chat mặc định (lần 1: không rõ, lần 2: 16/08/2026,
+                xem CONTRACTS.md Mục 19) — nếu xảy ra LẦN NỮA trước khi kịp
+                cập nhật code, người dùng tự sửa được NGAY qua `.env`
+                (không cần chờ code mới), không bị KHOÁ CỨNG chờ code như
+                lần này.
+            client_timeout_seconds: 🔒 MỚI (Backlog #1, CONTRACTS.md Mục
+                28) — timeout (giây) cho MỌI lời gọi qua `self._client`
+                (cả `transcribe()` lẫn translate/suggest_answer/summarize/
+                chat) — SDK `openai` mặc định KHÔNG set timeout tường minh,
+                rơi vào default ~600s (gần 10 phút) của `httpx` bên dưới,
+                treo cả pipeline nếu mạng "treo" (xem
+                `_resolve_client_timeout_seconds()` ở `openai_compat_base.py`
+                để biết đầy đủ lý do). 3 tầng ưu tiên giống hệt các tham số
+                model ở trên: (1) tham số này (kể cả giá trị bất kỳ được
+                truyền tường minh) > (2) biến môi trường
+                `GROQ_CLIENT_TIMEOUT_SECONDS` (chỉ nhận số thực > 0, sai
+                định dạng fallback default, không raise) > (3) hardcode
+                `_DEFAULT_CLIENT_TIMEOUT_SECONDS` (30.0s).
 
         Raises:
             ProviderError: nếu không tìm được api_key ở CẢ 3 nguồn trên,
@@ -150,32 +189,73 @@ class GroqProvider(OpenAICompatProvider):
                 "Lấy key thật tại https://console.groq.com/keys, mở file .env "
                 "(KHÔNG phải .env.example), sửa dòng GROQ_API_KEY=... rồi lưu lại."
             )
-        self._client = OpenAI(api_key=resolved_key, base_url=GROQ_BASE_URL)
-        self._stt_model = stt_model
-        self._stt_fallback_model = stt_fallback_model
-        self._translate_model = translate_model
-        self._translate_fallback_model = translate_fallback_model
+        self._client_timeout_seconds = _resolve_client_timeout_seconds(
+            client_timeout_seconds, "GROQ_CLIENT_TIMEOUT_SECONDS",
+        )
+        self._client = OpenAI(
+            api_key=resolved_key, base_url=GROQ_BASE_URL, timeout=self._client_timeout_seconds,
+        )
+        # 🔒 SỬA (02/09/2026, CONTRACTS.md Mục 19) -- 3 tầng ưu tiên, xem
+        # docstring __init__ ở trên. `is not None` (KHÔNG dùng `or`) để
+        # phân biệt đúng "không truyền gì" (None -> đọc tiếp env/default)
+        # với "truyền rỗng có chủ đích" ("" -> TẮT fallback, GIỮ NGUYÊN
+        # hành vi cũ, KHÔNG bị ghi đè bởi env/default).
+        self._stt_model = (
+            stt_model if stt_model is not None
+            else os.environ.get("GROQ_STT_MODEL") or "whisper-large-v3"
+        )
+        self._stt_fallback_model = (
+            stt_fallback_model if stt_fallback_model is not None
+            # KHÔNG dùng `or` ở đây (khác _stt_model/_translate_model phía
+            # trên) -- env var đặt "" có chủ đích (TẮT fallback qua .env)
+            # phải được TÔN TRỌNG, không bị "or" âm thầm thay bằng default.
+            else os.environ.get("GROQ_STT_FALLBACK_MODEL", "whisper-large-v3-turbo")
+        )
+        self._translate_model = (
+            translate_model if translate_model is not None
+            else os.environ.get("GROQ_TRANSLATE_MODEL") or "openai/gpt-oss-120b"
+        )
+        self._translate_fallback_model = (
+            translate_fallback_model if translate_fallback_model is not None
+            else os.environ.get("GROQ_TRANSLATE_FALLBACK_MODEL", "openai/gpt-oss-20b")
+        )
 
     def _auth_error_hint(self, api_label: str, exc: Exception) -> str:
         return _auth_error_hint("Groq", api_label, "GROQ_API_KEY", _GROQ_KEYS_URL, exc)
 
-    def transcribe(self, audio, samplerate: int) -> TranscriptionResult:
+    def transcribe(self, audio, samplerate: int, language_hint: str = "") -> TranscriptionResult:
         """Xem docstring đầy đủ ở AIProvider.transcribe()."""
         wav_bytes = _encode_wav_bytes(audio, samplerate)
 
         def _call(model: str):
+            # 🔒 MỚI (CONTRACTS.md Mục 38) -- `language` là tham số CHÍNH
+            # THỨC của Whisper API (Groq/OpenAI) để HINT ngôn ngữ, KHÔNG
+            # phải tự chế. Chỉ truyền khi người dùng CHỦ ĐỘNG chọn (khác
+            # rỗng) -- rỗng nghĩa là "Tự động", giữ NGUYÊN hành vi cũ (tự
+            # đoán ngôn ngữ), không truyền field không cần thiết.
+            kwargs = {"language": language_hint} if language_hint else {}
             return self._client.audio.transcriptions.create(
                 model=model,
                 file=("segment.wav", wav_bytes, "audio/wav"),
                 response_format="verbose_json",
+                **kwargs,
             )
 
         try:
-            response, _used_model = _call_with_rate_limit_fallback(
+            response, _used_model = _call_with_fallback(
                 _call, self._stt_model, self._stt_fallback_model, "STT",
             )
         except openai.AuthenticationError as exc:
             raise ProviderError(self._auth_error_hint("STT", exc)) from exc
+        except openai.APIConnectionError as exc:
+            # 🔒 MỚI (Backlog #2, CONTRACTS.md Mục 29) -- xem giải thích
+            # đầy đủ ở _chat_complete() (openai_compat_base.py); ở đây lặp
+            # lại cho transcribe() vì method này KHÔNG đi qua _chat_complete.
+            raise ProviderError(
+                f"Groq STT lỗi kết nối mạng (đã tự động thử lại "
+                f"{_TRANSIENT_NETWORK_MAX_RETRIES} lần, không thành công) — "
+                f"kiểm tra lại kết nối Internet rồi thử lại: {exc}"
+            ) from exc
         except openai.OpenAIError as exc:
             raise ProviderError(f"Groq STT API lỗi: {exc}") from exc
         except Exception as exc:  # phòng lỗi ngoài phạm vi SDK (parse, v.v.)

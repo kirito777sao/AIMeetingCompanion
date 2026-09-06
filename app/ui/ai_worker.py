@@ -36,6 +36,9 @@ from typing import Callable
 from PySide6.QtCore import QThread, Signal
 
 from app.ai.base_provider import ProviderError
+from app.logging_setup import get_logger
+
+_logger = get_logger()
 
 
 class OneShotAIWorker(QThread):
@@ -64,9 +67,14 @@ class OneShotAIWorker(QThread):
         try:
             result = self._action_fn()
         except ProviderError as exc:
+            # 🔒 MỚI (Backlog #3, CONTRACTS.md Mục 30) -- log lại lỗi
+            # suggest_answer()/translate()/summarize() (mọi hành động
+            # 1-lần qua nút bấm) ra file để debug từ xa.
+            _logger.error("OneShotAIWorker lỗi (ProviderError): %s", exc)
             self.failed.emit(str(exc))
             return
         except Exception as exc:  # noqa: BLE001 - không để lỗi lạ làm app crash
+            _logger.error("OneShotAIWorker lỗi không xác định: %s", exc, exc_info=True)
             self.failed.emit(f"Lỗi không xác định: {exc}")
             return
         self.succeeded.emit(result)

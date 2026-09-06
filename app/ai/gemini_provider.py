@@ -39,12 +39,12 @@ Hệ quả thiết kế (CỐ Ý, không phải thiếu sót):
    sandbox này (không network), cần bạn tự test lại với đoạn im
    lặng/nhạc nền đã dùng để verify Groq (CONTRACTS.md Mục 11) để đối
    chứng.
-4. **Rate-limit (429)**: lớp tương thích OpenAI của Google trả lỗi qua
-   CÙNG SDK `openai` nên `_call_with_rate_limit_fallback()` (dùng cho
-   phần chat) hoạt động được — nhưng đường REST riêng của `transcribe()`
-   (mục 2) KHÔNG đi qua SDK đó, nên tự xử lý 429 riêng ở
-   `_post_generate_content()` dưới đây, KHÔNG có model dự phòng để
-   fallback (Gemini không có "STT model rẻ hơn" tương đương
+4. **Rate-limit (429) / model bị decommission (404)**: lớp tương thích
+   OpenAI của Google trả lỗi qua CÙNG SDK `openai` nên `_call_with_fallback()`
+   (dùng cho phần chat, xem CONTRACTS.md Mục 19) hoạt động được — nhưng
+   đường REST riêng của `transcribe()` (mục 2) KHÔNG đi qua SDK đó, nên tự
+   xử lý 429 riêng ở `_post_generate_content()` dưới đây, KHÔNG có model
+   dự phòng để fallback (Gemini không có "STT model rẻ hơn" tương đương
    whisper-turbo) — 429 ở transcribe() raise thẳng ProviderError, báo rõ
    nguyên nhân.
 
@@ -65,7 +65,13 @@ from openai import OpenAI
 
 from app import config_store
 from app.ai.base_provider import ProviderError, TranscriptionResult
-from app.ai.openai_compat_base import OpenAICompatProvider, _auth_error_hint
+from app.ai.openai_compat_base import (
+    OpenAICompatProvider,
+    _auth_error_hint,
+    _resolve_client_timeout_seconds,
+    _retry_with_backoff,
+    _TRANSIENT_NETWORK_MAX_RETRIES,
+)
 from app.ai.whisper_utils import _encode_wav_bytes, _normalize_language_to_iso
 
 # Lớp tương thích OpenAI của Google -- CHỈ dùng cho phần chat (xem mục 1
@@ -94,6 +100,36 @@ _GEMINI_TRANSCRIBE_PROMPT = (
     "language_iso639_1; if genuinely undetermined, return an empty string."
 )
 
+# 🔒 MỚI (CONTRACTS.md Mục 38) -- ghép thêm 1 câu hint ngôn ngữ vào prompt
+# gốc khi người dùng CHỦ ĐỘNG chọn "Ngôn ngữ nguồn dự kiến" ở
+# MeetingContextDialog. Đặt tên biến/hàm riêng (không sửa hằng số gốc ở
+# trên) để test cũ dựa vào _GEMINI_TRANSCRIBE_PROMPT (nếu có) không bị ảnh
+# hưởng khi language_hint="" (mặc định, trả lại NGUYÊN VĂN prompt gốc).
+_LANGUAGE_HINT_NAMES = {
+    "vi": "Vietnamese", "en": "English", "zh": "Chinese",
+    "ja": "Japanese", "ko": "Korean",
+}
+
+
+def _build_transcribe_prompt(language_hint: str) -> str:
+    """Trả về prompt dùng cho `generateContent`. `language_hint=""` (mặc
+    định, "Tự động") trả về NGUYÊN `_GEMINI_TRANSCRIBE_PROMPT`, không đổi
+    hành vi cũ. Khi có hint: thêm 1 câu NGAY SAU prompt gốc, chỉ định
+    hướng (không ép cứng tuyệt đối — vẫn cho phép model tự báo cáo ngôn
+    ngữ khác nếu THẬT SỰ chắc chắn), giảm rủi ro model tự nhận nhầm ngôn
+    ngữ trên đoạn audio ồn/nhiều tạp âm (xem bối cảnh CONTRACTS.md Mục 38)."""
+    if not language_hint:
+        return _GEMINI_TRANSCRIBE_PROMPT
+    name = _LANGUAGE_HINT_NAMES.get(language_hint, language_hint)
+    return (
+        f"{_GEMINI_TRANSCRIBE_PROMPT} The speaker(s) in this recording are "
+        f"expected to primarily speak {name} (ISO 639-1 '{language_hint}') "
+        "-- background noise, music, or sound effects should NOT be "
+        "misread as a switch to a different language; only report a "
+        "different language_iso639_1 if you are genuinely confident the "
+        "actual spoken words are in a different language."
+    )
+
 _GEMINI_TRANSCRIBE_RESPONSE_SCHEMA = {
     "type": "OBJECT",
     "properties": {
@@ -118,6 +154,7 @@ class GeminiProvider(OpenAICompatProvider):
         translate_model: str = "gemini-2.5-flash",
         translate_fallback_model: str = "gemini-2.0-flash",
         http_timeout_seconds: float = 60.0,
+        client_timeout_seconds: float | None = None,
     ) -> None:
         """Khởi tạo provider, kết nối tới Gemini.
 
@@ -134,6 +171,14 @@ class GeminiProvider(OpenAICompatProvider):
             http_timeout_seconds: timeout cho lời gọi REST `transcribe()`
                 — STT mỗi segment audio ngắn (vài giây), 60s là dư thừa an
                 toàn cho network chậm, không phải con số cần tinh chỉnh.
+            client_timeout_seconds: 🔒 MỚI (Backlog #1, CONTRACTS.md Mục
+                28) — KHÁC `http_timeout_seconds` ở trên: đây là timeout
+                cho `self._client` (`openai.OpenAI`, CHỈ dùng cho phần chat
+                — translate/suggest_answer/summarize/chat — vì
+                `transcribe()` của Gemini đi qua `httpx` riêng, đã có
+                `http_timeout_seconds` từ trước, KHÔNG đụng ở đây). 3 tầng
+                ưu tiên: tham số > biến môi trường
+                `GEMINI_CLIENT_TIMEOUT_SECONDS` > default 30.0s.
 
         Raises:
             ProviderError: thiếu api_key ở mọi nguồn, hoặc key vẫn là giá
@@ -160,7 +205,14 @@ class GeminiProvider(OpenAICompatProvider):
                 f"bằng key THẬT. Lấy key thật tại {_GEMINI_KEYS_URL}."
             )
         self._api_key = resolved_key
-        self._client = OpenAI(api_key=resolved_key, base_url=GEMINI_OPENAI_COMPAT_BASE_URL)
+        self._client_timeout_seconds = _resolve_client_timeout_seconds(
+            client_timeout_seconds, "GEMINI_CLIENT_TIMEOUT_SECONDS",
+        )
+        self._client = OpenAI(
+            api_key=resolved_key,
+            base_url=GEMINI_OPENAI_COMPAT_BASE_URL,
+            timeout=self._client_timeout_seconds,
+        )
         self._stt_model = stt_model
         self._translate_model = translate_model
         self._translate_fallback_model = translate_fallback_model
@@ -169,17 +221,24 @@ class GeminiProvider(OpenAICompatProvider):
     def _auth_error_hint(self, api_label: str, exc: Exception) -> str:
         return _auth_error_hint("Gemini", api_label, "GEMINI_API_KEY", _GEMINI_KEYS_URL, exc)
 
-    def transcribe(self, audio, samplerate: int) -> TranscriptionResult:
+    def transcribe(self, audio, samplerate: int, language_hint: str = "") -> TranscriptionResult:
         """Xem docstring đầy đủ ở AIProvider.transcribe() + mục 2/3 docstring
         đầu file này (KHÁC hẳn cách Groq/OpenAI làm — không có segments/
-        avg_logprob thật)."""
+        avg_logprob thật).
+
+        `language_hint` (🔒 MỚI, CONTRACTS.md Mục 38): Gemini KHÔNG có
+        tham số `language` native như Whisper (không đi qua endpoint kiểu
+        Whisper, xem mục 2 docstring đầu file) — hint được nhét TRỰC TIẾP
+        vào prompt văn bản gửi kèm audio (`_build_transcribe_prompt()`)
+        thay vì 1 field cấu trúc riêng, do đây là cách DUY NHẤT tác động
+        tới hành vi nhận diện ngôn ngữ của `generateContent`."""
         wav_bytes = _encode_wav_bytes(audio, samplerate)
         b64_audio = base64.b64encode(wav_bytes).decode("ascii")
 
         payload = {
             "contents": [{
                 "parts": [
-                    {"text": _GEMINI_TRANSCRIBE_PROMPT},
+                    {"text": _build_transcribe_prompt(language_hint)},
                     {"inlineData": {"mimeType": "audio/wav", "data": b64_audio}},
                 ],
             }],
@@ -214,15 +273,31 @@ class GeminiProvider(OpenAICompatProvider):
         `httpx`/network thật, cùng tinh thần test
         `provider._client = fake_client` của Groq/OpenAI (xem
         `tests/test_gemini_provider_offline.py`).
+
+        🔒 MỚI (Backlog #2, CONTRACTS.md Mục 29) -- lời gọi `client.post()`
+        giờ tự động THỬ LẠI (backoff tăng dần, dùng chung
+        `_retry_with_backoff()` với Groq/OpenAI) khi gặp
+        `httpx.RequestError` (lỗi kết nối mạng TẠM THỜI -- KHÔNG bao gồm
+        `httpx.HTTPStatusError`, tức lỗi status code như 401/403/429 xử lý
+        RIÊNG bên dưới sau khi có response thật, không phải lỗi kết nối).
         """
         url = f"{GEMINI_NATIVE_BASE_URL}/models/{model}:generateContent"
         headers = {"x-goog-api-key": self._api_key, "Content-Type": "application/json"}
 
-        try:
+        def _do_post():
             with httpx.Client(timeout=self._http_timeout_seconds) as client:
-                response = client.post(url, json=payload, headers=headers)
+                return client.post(url, json=payload, headers=headers)
+
+        try:
+            response = _retry_with_backoff(
+                _do_post, lambda exc: isinstance(exc, httpx.RequestError),
+            )
         except httpx.RequestError as exc:
-            raise ProviderError(f"Gemini STT lỗi kết nối: {exc}") from exc
+            raise ProviderError(
+                f"Gemini STT lỗi kết nối mạng (đã tự động thử lại "
+                f"{_TRANSIENT_NETWORK_MAX_RETRIES} lần, không thành công) — "
+                f"kiểm tra lại kết nối Internet rồi thử lại: {exc}"
+            ) from exc
 
         if response.status_code in (401, 403):
             raise ProviderError(

@@ -22,6 +22,14 @@ app, KHÔNG cần sửa code/build lại.
 
 UI theo đúng mô tả PROJECT_SPEC.md mục 10.4: input API key dạng ẨN (mask)
 kèm icon hình mắt để bật/tắt hiện rõ — giống ô nhập password thông thường.
+
+🔒 MỞ RỘNG (Backlog #4, CONTRACTS.md Mục 31): thêm 4 ô nhập model
+(stt_model/stt_fallback_model/translate_model/translate_fallback_model)
+— để trống = dùng default (placeholder hiện đúng default hiện tại của
+provider đang chọn), điền vào = ghi đè qua `config_store.save_model_overrides()`,
+KHÔNG cần sửa `.env`/code. Mục đích: nếu 1 provider decommission model
+(đã xảy ra 2 lần với Groq, xem Mục 19), người dùng CUỐI (bản `.exe` không
+có `.env`) tự đổi được ngay trên máy họ, không phải chờ bản cập nhật.
 """
 
 from __future__ import annotations
@@ -31,6 +39,7 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
+    QFormLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -39,7 +48,17 @@ from PySide6.QtWidgets import (
 )
 
 from app import config_store
-from app.ai.provider_factory import display_name
+from app.ai.provider_factory import display_name, get_default_models_for_display
+
+# 🔒 MỚI (Backlog #4, CONTRACTS.md Mục 31) -- (field, nhãn hiển thị) theo
+# ĐÚNG thứ tự `_MODEL_OVERRIDE_FIELDS` (config_store.py) -- 1 nguồn DUY
+# NHẤT, thêm field model thứ 5 sau này CHỈ cần thêm 1 dòng ở đây.
+_MODEL_FIELDS: tuple[tuple[str, str], ...] = (
+    ("stt_model", "STT model (ưu tiên)"),
+    ("stt_fallback_model", "STT model dự phòng"),
+    ("translate_model", "Chat model (ưu tiên)"),
+    ("translate_fallback_model", "Chat model dự phòng"),
+)
 
 # 🔒 1 nguồn DUY NHẤT cho mọi thông tin hiển thị riêng từng provider — thêm
 # provider thứ 4 sau này CHỈ cần thêm 1 entry ở đây + 1 class AIProvider
@@ -83,7 +102,7 @@ class SettingsDialog(QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("⚙️ Cài đặt")
-        self.resize(520, 340)
+        self.resize(520, 480)
 
         layout = QVBoxLayout(self)
 
@@ -137,6 +156,27 @@ class SettingsDialog(QDialog):
         note_label.setObjectName("StatusLabel")
         layout.addWidget(note_label)
 
+        # 🔒 MỚI (Backlog #4, CONTRACTS.md Mục 31) -- 4 ô model nâng cao,
+        # để trống = dùng default (placeholder hiện đúng default hiện tại).
+        model_section_label = QLabel(
+            "Model nâng cao (tuỳ chọn — để trống dùng mặc định; chỉ đổi nếu "
+            "provider decommission model gây lỗi):"
+        )
+        model_section_label.setWordWrap(True)
+        layout.addWidget(model_section_label)
+
+        model_form = QFormLayout()
+        self._model_edits: dict[str, QLineEdit] = {}
+        for field, label in _MODEL_FIELDS:
+            edit = QLineEdit()
+            model_form.addRow(label, edit)
+            self._model_edits[field] = edit
+        layout.addLayout(model_form)
+
+        restore_defaults_button = QPushButton("Khôi phục mặc định (model)")
+        restore_defaults_button.clicked.connect(self._on_restore_defaults_clicked)
+        layout.addWidget(restore_defaults_button)
+
         self._status_label = QLabel("")
         self._status_label.setObjectName("StatusLabel")
         layout.addWidget(self._status_label)
@@ -163,6 +203,15 @@ class SettingsDialog(QDialog):
         self._provider_combo.setCurrentIndex(initial_index)
         self._refresh_provider_fields()
 
+    def showEvent(self, event) -> None:  # noqa: N802 - tên hàm theo Qt convention
+        """🔒 MỚI (Mục 34) -- dialog này giờ được `MainWindow` TÁI SỬ DỤNG
+        (singleton, xem `_on_settings_clicked`) thay vì tạo instance mới mỗi
+        lần bấm nút -- nạp lại field hiện tại MỖI LẦN cửa sổ được show() lại
+        (không chỉ lúc khởi tạo), phòng trường hợp active_provider/key đã
+        đổi qua nguồn khác từ lần đóng dialog trước tới giờ."""
+        super().showEvent(event)
+        self._refresh_provider_fields()
+
     def _current_provider(self) -> str:
         return self._provider_combo.currentData()
 
@@ -182,6 +231,17 @@ class SettingsDialog(QDialog):
 
         existing = config_store.load_api_key(provider=provider)
         self._key_edit.setText(existing or "")
+
+        # 🔒 MỚI (Backlog #4, CONTRACTS.md Mục 31) -- placeholder = default
+        # HIỆN TẠI của provider này (chỉ để hiện gợi ý, KHÔNG quyết định
+        # hành vi thật -- xem docstring `_DEFAULT_MODELS_FOR_DISPLAY`),
+        # text = override đã lưu (nếu có), để trống nếu chưa từng override.
+        defaults = get_default_models_for_display(provider)
+        overrides = config_store.load_model_overrides(provider)
+        for field, edit in self._model_edits.items():
+            edit.setPlaceholderText(defaults.get(field, ""))
+            edit.setText(overrides.get(field, ""))
+
         self._set_status("", is_error=False)
 
     def _on_link_clicked(self) -> None:
@@ -204,6 +264,19 @@ class SettingsDialog(QDialog):
         except config_store.ConfigStoreError as exc:
             self._set_status(f"Không lưu được: {exc}", is_error=True)
             return
+
+        # 🔒 MỚI (Backlog #4, CONTRACTS.md Mục 31) -- lưu cùng lúc với API
+        # key (1 nút Lưu duy nhất, đúng UX hiện có -- KHÔNG thêm nút Lưu
+        # thứ 2 riêng cho model, tránh người dùng bấm nhầm nút, tưởng đã
+        # lưu model nhưng quên bấm Lưu key hoặc ngược lại). Field để trống
+        # tự động bị `save_model_overrides()` loại khỏi override (Mục 31).
+        model_overrides = {field: edit.text() for field, edit in self._model_edits.items()}
+        try:
+            config_store.save_model_overrides(provider, model_overrides)
+        except config_store.ConfigStoreError as exc:
+            self._set_status(f"Đã lưu API key nhưng KHÔNG lưu được model: {exc}", is_error=True)
+            return
+
         name = display_name(provider)
         msg = (
             f"Đã lưu key {name} (đã mã hoá) và đặt {name} làm provider đang dùng."
@@ -222,6 +295,23 @@ class SettingsDialog(QDialog):
             return
         self._key_edit.clear()
         self._set_status(f"Đã xoá API key {display_name(provider)} đã lưu.", is_error=False)
+
+    def _on_restore_defaults_clicked(self) -> None:
+        """🔒 MỚI (Backlog #4, CONTRACTS.md Mục 31) -- xoá TOÀN BỘ model
+        override đã lưu của provider ĐANG CHỌN, quay lại default hardcode.
+        KHÔNG đụng API key (2 khái niệm khác nhau, xem docstring nút này ở
+        `__init__`) -- KHÔNG đụng override của provider khác."""
+        provider = self._current_provider()
+        try:
+            config_store.clear_model_overrides(provider)
+        except config_store.ConfigStoreError as exc:
+            self._set_status(f"Không khôi phục được: {exc}", is_error=True)
+            return
+        for edit in self._model_edits.values():
+            edit.clear()
+        self._set_status(
+            f"Đã khôi phục model mặc định cho {display_name(provider)}.", is_error=False,
+        )
 
     def _set_status(self, text: str, is_error: bool) -> None:
         self._status_label.setText(text)

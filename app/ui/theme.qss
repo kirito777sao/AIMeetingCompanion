@@ -37,6 +37,80 @@ QMainWindow {
     background-color: #0B0E14;          /* --bg-base */
 }
 
+QDialog {
+    background-color: #0B0E14;          /* --bg-base */
+}
+
+/* ------------------------------------------------------------------------
+   🔒 MỚI (02/09/2026, CONTRACTS.md Mục 18.4) — Fallback mặc định cho MỌI
+   nút bấm/ô nhập CHƯA được style riêng (vd nút "Tạo lại"/suggestion_drawer.py,
+   nút "🔄"/history_dialog.py, ô nhập trong meeting_context_dialog.py...).
+
+   TRƯỚC bản sửa này, các widget đó dùng NGUYÊN style Windows mặc định
+   (nút xám sáng, viền vuông) NẰM CẠNH các widget ĐÃ style riêng theo
+   theme.qss (nút bo tròn, nền tối, viền accent) -- 2 "ngôn ngữ thiết kế"
+   khác nhau cùng lúc trên 1 màn hình chính là nguyên nhân chính khiến
+   giao diện "lộn xộn" (KHÔNG phải do bảng màu xấu). Rule ở đây dùng
+   element-selector (`QPushButton`, không phải `QPushButton#TenRieng`) nên
+   độ ưu tiên CSS THẤP HƠN mọi rule object-name cụ thể bên dưới (vd
+   #PrimaryButton, #DangerButton, #AskAiButton) -- các rule đó LUÔN thắng
+   bất kể thứ tự khai báo trước/sau trong file này, an toàn 100% không ghi
+   đè nhầm các nút đã tinh chỉnh riêng.
+   ------------------------------------------------------------------------ */
+
+QPushButton {
+    background-color: #1A1F2E;           /* --bg-surface-alt */
+    color: #E6E9EF;                       /* --text-primary */
+    border: 1px solid #232938;            /* --border-subtle */
+    border-radius: 6px;                   /* --radius-sm */
+    padding: 6px 14px;
+}
+
+QPushButton:hover {
+    background-color: #232938;            /* --border-subtle, sáng hơn 1 bậc */
+    border-color: #4F8EF7;                /* --accent-primary, gợi ý "bấm được" */
+}
+
+QPushButton:pressed {
+    background-color: #0B0E14;            /* --bg-base */
+}
+
+QPushButton:disabled {
+    background-color: #131722;            /* --bg-surface */
+    color: #4D5566;                       /* --text-disabled */
+    border-color: #1A1F2E;                /* --bg-surface-alt */
+}
+
+QLineEdit, QTextEdit {
+    background-color: #131722;            /* --bg-surface */
+    color: #E6E9EF;                        /* --text-primary */
+    border: 1px solid #232938;             /* --border-subtle */
+    border-radius: 6px;                    /* --radius-sm */
+    padding: 6px 8px;
+    selection-background-color: rgba(79, 142, 247, 0.35);  /* --accent-primary 35% */
+}
+
+QLineEdit:focus, QTextEdit:focus {
+    border: 1px solid #4F8EF7;             /* --accent-primary */
+}
+
+QLineEdit:disabled, QTextEdit:disabled {
+    color: #4D5566;                        /* --text-disabled */
+    background-color: #0B0E14;             /* --bg-base */
+}
+
+QToolTip {
+    background-color: #1A1F2E;             /* --bg-surface-alt */
+    color: #E6E9EF;                         /* --text-primary */
+    border: 1px solid #232938;              /* --border-subtle */
+    padding: 4px 8px;
+    border-radius: 4px;                     /* --radius-sm */
+}
+
+QMessageBox {
+    background-color: #131722;              /* --bg-surface */
+}
+
 /* ---- Banner ghi âm (consent) ---- */
 #RecordingBanner {
     background-color: rgba(255, 84, 112, 0.12);  /* --accent-recording 12% opacity */
@@ -97,6 +171,18 @@ QMainWindow {
     padding: 1px 6px;
     font-size: 11px;
     font-weight: 600;
+}
+
+/* 🔒 MỚI (CONTRACTS.md Mục 23) — chip "🔊 [Âm thanh]" của AudioOnlyBubble,
+   dùng chung tông màu trung tính với LanguageChip (KHÔNG phải cảnh báo/lỗi
+   — đây là tình huống bình thường khi gặp nhạc/tạp âm, không cần màu nổi
+   bật như WarningChip). */
+#AudioOnlyChip {
+    background-color: #1A1F2E;            /* --bg-surface-alt */
+    color: #8A93A6;                        /* --text-secondary */
+    border-radius: 6px;                    /* --radius-sm */
+    padding: 1px 6px;
+    font-size: 12px;
 }
 
 #OriginalText {
@@ -211,6 +297,18 @@ QComboBox {
     padding: 4px 8px;
 }
 
+QComboBox:hover {
+    border-color: #4F8EF7;                  /* --accent-primary */
+}
+
+QComboBox QAbstractItemView {
+    background-color: #1A1F2E;              /* --bg-surface-alt */
+    color: #E6E9EF;                          /* --text-primary */
+    border: 1px solid #232938;               /* --border-subtle */
+    selection-background-color: rgba(79, 142, 247, 0.20);  /* --accent-primary 20% */
+    outline: none;
+}
+
 QScrollBar:vertical {
     background: #0B0E14;
     width: 8px;
@@ -220,4 +318,31 @@ QScrollBar::handle:vertical {
     background: #232938;                    /* --border-subtle */
     border-radius: 4px;
     min-height: 24px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: #4F8EF7;                    /* --accent-primary */
+}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px;                            /* bỏ 2 nút mũi tên đầu/cuối, kiểu hiện đại */
+}
+
+QScrollBar:horizontal {
+    background: #0B0E14;
+    height: 8px;
+}
+
+QScrollBar::handle:horizontal {
+    background: #232938;                    /* --border-subtle */
+    border-radius: 4px;
+    min-width: 24px;
+}
+
+QScrollBar::handle:horizontal:hover {
+    background: #4F8EF7;                    /* --accent-primary */
+}
+
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    width: 0px;
 }

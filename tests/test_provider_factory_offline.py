@@ -84,6 +84,66 @@ def test_create_provider_truyen_kwargs_xuong_constructor():
     print("OK: test_create_provider_truyen_kwargs_xuong_constructor")
 
 
+# ---------------------------------------------------------------------------
+# 🔒 MỚI (T19, CONTRACTS.md Mục 31, Backlog #4) -- test cho việc merge
+# model override đã lưu qua Settings UI vào create_provider(). Monkeypatch
+# `config_store.load_model_overrides` (KHÔNG dùng base_dir thật) -- cùng lý
+# do cách ly test khỏi %APPDATA% thật đã áp dụng ở TASKS.md Mục 25 (T9)
+# cho `load_api_key`: `create_provider()` gọi `load_model_overrides()`
+# KHÔNG truyền base_dir, nên phải monkeypatch thẳng hàm thay vì dùng
+# tempfile, nếu không test sẽ đọc/ghi nhầm vào config.json thật của máy
+# chạy test.
+# ---------------------------------------------------------------------------
+
+
+def test_create_provider_dung_model_override_da_luu_qua_settings():
+    original_load = config_store.load_model_overrides
+    config_store.load_model_overrides = lambda provider, base_dir=None: {
+        "translate_model": "model-tu-settings-ui",
+    }
+    try:
+        provider = create_provider(provider="groq", api_key="gsk_fake")
+        assert provider._translate_model == "model-tu-settings-ui", (
+            "create_provider() PHẢI dùng model override đã lưu qua Settings "
+            "UI khi caller KHÔNG tự truyền kwargs."
+        )
+    finally:
+        config_store.load_model_overrides = original_load
+    print("OK: test_create_provider_dung_model_override_da_luu_qua_settings")
+
+
+def test_create_provider_kwargs_thang_model_override_da_luu():
+    original_load = config_store.load_model_overrides
+    config_store.load_model_overrides = lambda provider, base_dir=None: {
+        "translate_model": "model-tu-settings-ui",
+    }
+    try:
+        provider = create_provider(
+            provider="groq", api_key="gsk_fake", translate_model="model-truyen-truc-tiep",
+        )
+        assert provider._translate_model == "model-truyen-truc-tiep", (
+            "kwargs caller truyền TRỰC TIẾP phải THẮNG override đã lưu qua "
+            "Settings UI (đúng thứ tự ưu tiên CONTRACTS.md Mục 31)."
+        )
+    finally:
+        config_store.load_model_overrides = original_load
+    print("OK: test_create_provider_kwargs_thang_model_override_da_luu")
+
+
+def test_create_provider_khong_co_override_dung_default_provider():
+    original_load = config_store.load_model_overrides
+    config_store.load_model_overrides = lambda provider, base_dir=None: {}
+    try:
+        provider = create_provider(provider="groq", api_key="gsk_fake")
+        assert provider._translate_model == "openai/gpt-oss-120b", (
+            "Chưa từng override qua Settings UI -- PHẢI dùng default hardcode "
+            "của GroqProvider như trước Mục 31, không bị đổi hành vi."
+        )
+    finally:
+        config_store.load_model_overrides = original_load
+    print("OK: test_create_provider_khong_co_override_dung_default_provider")
+
+
 def test_display_name():
     assert display_name("groq") == "Groq"
     assert display_name("openai") == "OpenAI"
@@ -120,5 +180,8 @@ if __name__ == "__main__":
     test_create_provider_ten_khong_hop_le_raise_provider_error()
     test_create_provider_truyen_kwargs_xuong_constructor()
     test_create_provider_doc_bien_moi_truong_ai_provider_khi_khong_truyen_gi()
+    test_create_provider_dung_model_override_da_luu_qua_settings()
+    test_create_provider_kwargs_thang_model_override_da_luu()
+    test_create_provider_khong_co_override_dung_default_provider()
     test_display_name()
     print("\n=== TẤT CẢ TEST PROVIDER_FACTORY (OFFLINE/MOCK) PASS ===")

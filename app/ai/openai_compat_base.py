@@ -34,11 +34,144 @@ KHÔNG cần sửa gì (file test đó import 1 số tên trực tiếp từ
 from __future__ import annotations
 
 import json
+import os
+import time
 from typing import Any
 
 import openai
 
 from app.ai.base_provider import AIProvider, ProviderError, SummaryResult, TranscriptionResult
+
+# 🔒 MỚI (Backlog #1 -- timeout tường minh cho client Groq/OpenAI/Gemini,
+# xem CONTRACTS.md Mục 28): SDK `openai` mặc định KHÔNG set timeout tường
+# minh -> rơi vào default của thư viện `httpx` bên dưới, thực tế đo được
+# là `Timeout(connect=5.0, read=600, write=600, pool=600)` -- tức treo
+# TỐI ĐA GẦN 10 PHÚT cho 1 lần gọi nếu mạng "treo" (không timeout hẳn,
+# không lỗi hẳn, chỉ im lặng chờ) trước khi UI thấy bất kỳ phản hồi nào
+# (lỗi hay thành công). Với 1 app trợ lý họp real-time, đây là treo
+# KHÔNG chấp nhận được (segment tiếp theo cũng bị chặn theo, xem
+# CONTRACTS.md Mục 3 -- pipeline đồng bộ, tuần tự).
+#
+# `_DEFAULT_CLIENT_TIMEOUT_SECONDS`: áp dụng CHUNG cho client `openai.OpenAI`
+# của cả 3 provider (Groq/OpenAI dùng client này cho CẢ transcribe() lẫn
+# translate()/suggest_answer()/summarize()/chat(); Gemini chỉ dùng cho
+# phần chat -- transcribe() của Gemini đã có timeout riêng từ trước qua
+# `http_timeout_seconds`, xem `gemini_provider.py`, KHÔNG đụng tới ở đây).
+# 30 giây là đủ rộng rãi cho STT 1 segment audio ngắn (VAD cắt tối đa
+# 8000ms, xem CONTRACTS.md Mục 16.2) + các lệnh chat (README ghi nhận độ
+# trễ thật ~1.5-4s/lần gọi) trong điều kiện mạng bình thường, nhưng KHÔNG
+# để 1 lần mạng "treo" chặn pipeline gần 10 phút như default SDK.
+_DEFAULT_CLIENT_TIMEOUT_SECONDS = 30.0
+
+
+def _resolve_client_timeout_seconds(
+    explicit: float | None, env_var_name: str, default: float = _DEFAULT_CLIENT_TIMEOUT_SECONDS,
+) -> float:
+    """3 tầng ưu tiên (tham số > biến môi trường > hardcode default) --
+    ĐÚNG pattern đã dùng cho tên model ở `GroqProvider.__init__`
+    (CONTRACTS.md Mục 19) và cho ngưỡng VAD/no_speech_prob (Mục 27), áp
+    dụng thêm cho tham số timeout của client HTTP.
+
+    `explicit` (tham số truyền trực tiếp lúc khởi tạo provider) LUÔN thắng
+    nếu khác `None` -- kể cả giá trị "vô lý" (0 hoặc âm) được truyền TƯỜNG
+    MINH vẫn được tôn trọng (để test tự do mô phỏng timeout cực ngắn nếu
+    cần) khác với biến môi trường (mục dưới, validate chặt hơn vì người
+    dùng cuối gõ tay dễ sai).
+
+    Biến môi trường: chỉ chấp nhận số thực > 0 -- rỗng, không parse được,
+    hoặc <= 0 đều fallback về `default`, KHÔNG raise (gõ nhầm `.env`
+    không được làm app không khởi động được, cùng nguyên tắc
+    `create_vad_segmenter_from_env()` ở `app/audio/vad.py`).
+    """
+    if explicit is not None:
+        return explicit
+    raw = os.environ.get(env_var_name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw.strip())
+    except ValueError:
+        return default
+    if value <= 0:
+        return default
+    return value
+
+
+# 🔒 MỚI (Backlog #2 -- retry có backoff cho lỗi mạng TẠM THỜI, xem
+# CONTRACTS.md Mục 29): trước đây 1 lần mất mạng/gián đoạn TỨC THỜI (vd
+# wifi chớp tắt 1-2 giây, timeout mạng đúng lúc router đổi kênh) là lỗi
+# CỨNG ngay lập tức cho CẢ segment audio đó -- không tự thử lại, dù đây
+# là loại lỗi THƯỜNG tự khỏi nếu thử lại sau vài giây (khác hẳn 401/400 -
+# lỗi cấu hình, thử lại không ích gì).
+#
+# CHỈ áp dụng retry cho `openai.APIConnectionError` (bao gồm
+# `openai.APITimeoutError`, là subclass -- xem hierarchy SDK thật đã tự
+# kiểm tra: APITimeoutError -> APIConnectionError -> APIError ->
+# OpenAIError) -- đây là lỗi Ở TẦNG KẾT NỐI (DNS/socket/timeout khi ĐANG
+# gửi request), KHÁC HẲN lỗi HTTP status code (429/404/401/400...) đã có
+# xử lý riêng (fallback model hoặc raise thẳng, xem `_call_with_fallback`
+# dưới đây) -- retry KHÔNG giải quyết được lỗi status code (server đã trả
+# lời rõ ràng, thử lại y hệt sẽ ra y hệt kết quả, trừ 429 vốn đã fallback
+# model rồi), chỉ có ý nghĩa cho lỗi kết nối tạm thời.
+_TRANSIENT_NETWORK_MAX_RETRIES = 2  # tổng số lần THỬ LẠI (không tính lần gọi đầu)
+_TRANSIENT_NETWORK_BACKOFF_BASE_SECONDS = 1.0  # giây -- backoff: 1s, 2s (nhân đôi mỗi lần)
+
+
+def _sleep_backoff(seconds: float) -> None:
+    """Tách riêng thành hàm module-level để test tự monkeypatch (thay
+    bằng no-op/ghi lại số giây được gọi) -- KHÔNG để test unit chạy CHẬM
+    THẬT vì backoff thật có thể cộng dồn vài giây (1s + 2s = 3s/test)."""
+    time.sleep(seconds)
+
+
+def _retry_with_backoff(
+    call_fn: Any,
+    is_retryable: Any,
+    max_retries: int = _TRANSIENT_NETWORK_MAX_RETRIES,
+    backoff_base: float = _TRANSIENT_NETWORK_BACKOFF_BASE_SECONDS,
+) -> Any:
+    """Gọi `call_fn()` (KHÔNG tham số -- caller tự đóng gói qua closure/
+    lambda nếu cần truyền gì), tự động THỬ LẠI khi lỗi raise ra thoả
+    `is_retryable(exc)` -- backoff TĂNG DẦN (nhân đôi mỗi lần: 1s, 2s...)
+    giữa các lần thử.
+
+    Dùng CHUNG được cho cả lỗi qua SDK `openai` (`_call_with_retry` dưới
+    đây) LẪN lỗi qua `httpx` trực tiếp (transcribe() của Gemini, xem
+    `gemini_provider.py`) -- `is_retryable` là 1 hàm nhận exception, trả
+    `True`/`False`, để caller tự quyết định loại lỗi nào coi là "tạm thời,
+    đáng thử lại" cho ĐÚNG SDK/thư viện của mình, hàm này không cần biết
+    chi tiết đó.
+
+    Sau `max_retries` lần thử lại (tổng `max_retries + 1` lần gọi) mà vẫn
+    lỗi retryable -- để lỗi CUỐI CÙNG bay lên cho caller, KHÔNG nuốt/che
+    giấu, KHÔNG lặp vô hạn.
+    """
+    attempt = 0
+    while True:
+        try:
+            return call_fn()
+        except Exception as exc:
+            if not is_retryable(exc) or attempt >= max_retries:
+                raise
+            _sleep_backoff(backoff_base * (2 ** attempt))
+            attempt += 1
+
+
+def _call_with_retry(
+    call_fn: Any,
+    model: str,
+    max_retries: int = _TRANSIENT_NETWORK_MAX_RETRIES,
+    backoff_base: float = _TRANSIENT_NETWORK_BACKOFF_BASE_SECONDS,
+) -> Any:
+    """`_retry_with_backoff()` chuyên biệt cho lời gọi qua SDK `openai` --
+    retry KHÔNG đổi `model` (khác `_call_with_fallback`, vốn đổi SANG model
+    khác) khi gặp `openai.APIConnectionError`, GIỮ NGUYÊN model đang thử vì
+    đây là lỗi kết nối tạm thời, không liên quan gì tới model được chọn."""
+    return _retry_with_backoff(
+        lambda: call_fn(model),
+        lambda exc: isinstance(exc, openai.APIConnectionError),
+        max_retries=max_retries, backoff_base=backoff_base,
+    )
 
 # Map mã ISO 639-1 dùng trong dự án -> tên ngôn ngữ tiếng Anh, đưa vào
 # prompt dịch cho model hiểu rõ hơn là chỉ đưa mã 2 ký tự trần.
@@ -46,6 +179,8 @@ _LANGUAGE_NAMES: dict[str, str] = {
     "en": "English",
     "vi": "Vietnamese",
     "zh": "Chinese",
+    "ja": "Japanese",  # 🔒 MỚI (CONTRACTS.md Mục 22) — thêm tiếng mẹ đẻ Nhật/Hàn
+    "ko": "Korean",
 }
 
 
@@ -61,10 +196,11 @@ def _language_name(code: str) -> str:
 # system prompt yêu cầu trả lời bằng user_native_lang.
 #
 # CHỦ Ý KHÔNG thêm dependency nhận diện ngôn ngữ đầy đủ (langdetect/
-# fasttext...) cho việc này — chỉ cần phân biệt ĐÚNG 3 SCRIPT rõ rệt liên
-# quan tới 3 ngôn ngữ mẹ đẻ hiện hỗ trợ (vi/en dùng chữ Latin, zh dùng chữ
-# Hán) — đủ để bắt đúng case THẬT đã gặp, dùng làm tín hiệu retry trong
-# suggest_answer().
+# fasttext...) cho việc này — chỉ cần phân biệt ĐÚNG 3 SCRIPT rõ rệt (Latin/
+# Hán/Kana/Hangul) — đủ để bắt đúng case THẬT đã gặp, dùng làm tín hiệu retry
+# trong suggest_answer(). 🔒 CẬP NHẬT (CONTRACTS.md Mục 22) — ban đầu chỉ
+# dùng cho 3 ngôn ngữ mẹ đẻ vi/en/zh, giờ dùng luôn cho ja/ko (thêm sau) —
+# xem nhánh native_lang == "ja"/"ko" trong _looks_like_wrong_script().
 _HAN_RANGE = (0x4E00, 0x9FFF)      # chữ Hán (dùng chung Trung/Nhật/Hàn-Hanja)
 _KANA_RANGE = (0x3040, 0x30FF)     # Hiragana + Katakana (đặc trưng tiếng Nhật)
 _HANGUL_RANGE = (0xAC00, 0xD7A3)   # âm tiết Hangul (đặc trưng tiếng Hàn)
@@ -104,9 +240,9 @@ def _looks_like_wrong_script(text: str, native_lang: str) -> bool:
     không. Một vài ký tự CJK lẫn vào (vd trích 1 từ tiếng Trung trong câu
     trả lời tiếng Việt) KHÔNG đủ vượt ngưỡng 15% nên không bị báo nhầm.
 
-    `native_lang` không nằm trong 3 mã đã biết script (vi/en/zh) -> luôn
-    trả False (không đủ thông tin để đoán "script đúng" của ngôn ngữ đó,
-    thà bỏ qua còn hơn báo sai).
+    `native_lang` không nằm trong 5 mã đã biết script (vi/en/zh/ja/ko) ->
+    luôn trả False (không đủ thông tin để đoán "script đúng" của ngôn ngữ
+    đó, thà bỏ qua còn hơn báo sai).
     """
     total, han, kana, hangul = _script_char_counts(text)
     if total == 0:
@@ -117,6 +253,17 @@ def _looks_like_wrong_script(text: str, native_lang: str) -> bool:
         # Chữ Hán (han) là script ĐÚNG của tiếng Trung -- chỉ Kana/Hangul
         # lẫn vào mới là dấu hiệu lệch (model trả lời bằng tiếng Nhật/Hàn).
         foreign = kana + hangul
+    elif native_lang == "ja":
+        # 🔒 MỚI (CONTRACTS.md Mục 22) -- Kana là script ĐẶC TRƯNG đúng của
+        # tiếng Nhật, và chữ Hán (Kanji) CŨNG hợp lệ trong câu tiếng Nhật
+        # bình thường (KHÔNG coi là "lệch" như trường hợp zh ở trên) --
+        # chỉ Hangul lẫn vào mới là dấu hiệu model trả lời nhầm tiếng Hàn.
+        foreign = hangul
+    elif native_lang == "ko":
+        # Hangul là script ĐÚNG của tiếng Hàn; chữ Hán (Hanja) thỉnh thoảng
+        # vẫn xuất hiện hợp lệ trong tiếng Hàn trang trọng -- chỉ Kana lẫn
+        # vào mới là dấu hiệu model trả lời nhầm tiếng Nhật.
+        foreign = kana
     else:
         return False
     return (foreign / total) > _WRONG_SCRIPT_RATIO_THRESHOLD
@@ -173,37 +320,67 @@ def _auth_error_hint(
     )
 
 
-def _call_with_rate_limit_fallback(
+def _call_with_fallback(
     call_fn: Any, primary_model: str, fallback_model: str, error_label: str,
 ) -> tuple[Any, str]:
-    """Gọi `call_fn(model)` với `primary_model` trước; nếu server trả 429
-    (`openai.RateLimitError` — đúng nghĩa "hết quota free tier ở model này
-    NGAY LÚC NÀY", KHÁC với 400/401/lỗi mạng), tự động thử lại NGAY 1 lần
-    với `fallback_model`. KHÔNG fallback cho bất kỳ lỗi nào khác — đổi
-    model không giải quyết được lỗi auth/network/bad-request, fallback
+    """Gọi `call_fn(model)` với `primary_model` trước; tự động thử lại NGAY
+    1 lần với `fallback_model` nếu server trả về 1 trong 2 lỗi CÓ THỂ giải
+    quyết được bằng cách ĐỔI MODEL:
+
+    1. `openai.RateLimitError` (429) — hết quota free tier ở model này
+       NGAY LÚC NÀY (lỗi tạm thời, đổi model khác thường còn quota).
+    2. `openai.NotFoundError` (404) — 🔒 MỚI (02/09/2026, sau lần thứ 2
+       gặp lỗi thật `model_not_found` vì Groq decommission
+       `llama-3.3-70b-versatile`/`llama-3.1-8b-instant`, xem CONTRACTS.md
+       Mục 19) — model bị nhà cung cấp NGỪNG HỖ TRỢ VĨNH VIỄN (khác hẳn
+       429 tạm thời), NHƯNG cùng 1 cách giải quyết: thử model khác. Trước
+       đây CHỈ bắt 429 — nghĩa là nếu primary_model bị decommission,
+       app sẽ lỗi CỨNG ngay cả khi fallback_model (thường là model nhỏ
+       hơn, ít bị decommission cùng lúc) vẫn CÒN dùng được — không có lý
+       do gì không thử fallback trong trường hợp này.
+
+    KHÔNG fallback (đổi model) cho bất kỳ lỗi nào khác (401 auth, 400 bad
+    request...) — đổi model không giải quyết được các lỗi đó, fallback
     trong các trường hợp đó chỉ che giấu lỗi thật + tốn thêm 1 lượt gọi.
+
+    🔒 MỚI (Backlog #2, CONTRACTS.md Mục 29) — MỖI lần gọi `call_fn(model)`
+    ở trên (cả `primary_model` LẪN `fallback_model`) giờ đi qua
+    `_call_with_retry()` — tự động THỬ LẠI (KHÔNG đổi model, backoff tăng
+    dần) khi gặp `openai.APIConnectionError` (lỗi kết nối mạng TẠM THỜI,
+    KHÁC HẲN 429/404 ở trên — xem docstring `_call_with_retry`/
+    `_retry_with_backoff`). Nếu retry hết lượt mà vẫn lỗi kết nối, lỗi đó
+    bay THẲNG lên caller của `_call_with_fallback` (KHÔNG bị bắt bởi
+    `except (RateLimitError, NotFoundError)` bên dưới — đổi model không
+    sửa được lỗi kết nối mạng, không có lý do gì thử fallback_model).
 
     Trả về `(response, model_đã_dùng)`.
 
-    Nếu `fallback_model` CŨNG bị 429 (hoặc trùng `primary_model`, tức
-    không có fallback thật), để lỗi RateLimitError đó tự bay lên cho
+    Nếu `fallback_model` CŨNG lỗi (429 HOẶC 404), hoặc trùng
+    `primary_model` (tức không có fallback thật), để lỗi đó tự bay lên cho
     caller xử lý như mọi lỗi khác — KHÔNG lặp vô hạn, KHÔNG tự bịa kết
-    quả giả khi cả 2 model đều hết quota.
+    quả giả khi cả 2 model đều không dùng được.
 
     ⚠️ Dùng được CHUNG cho Groq/OpenAI/Gemini-qua-lớp-tương-thích vì cả 3
-    đều đi qua CÙNG 1 SDK `openai` -- exception `openai.RateLimitError`
-    được SDK raise dựa trên HTTP status code (429) của response nhận
-    được, KHÔNG phụ thuộc server thật là Groq/OpenAI/Google. Vẫn CHƯA
-    verify được 100% Google trả đúng status code 429 (so với có thể trả
-    400/khác) cho trường hợp hết quota qua lớp tương thích này — cần bạn
-    tự quan sát log thật nếu dùng Gemini và gặp giới hạn free tier.
+    đều đi qua CÙNG 1 SDK `openai` -- các exception này được SDK raise dựa
+    trên HTTP status code của response nhận được, KHÔNG phụ thuộc server
+    thật là Groq/OpenAI/Google. Vẫn CHƯA verify được 100% Google trả đúng
+    status code cho các trường hợp này qua lớp tương thích này — cần bạn
+    tự quan sát log thật nếu dùng Gemini và gặp lỗi tương tự.
     """
     try:
-        return call_fn(primary_model), primary_model
-    except openai.RateLimitError:
+        return _call_with_retry(call_fn, primary_model), primary_model
+    except (openai.RateLimitError, openai.NotFoundError) as exc:
         if not fallback_model or fallback_model == primary_model:
             raise
-        return call_fn(fallback_model), fallback_model
+        try:
+            return _call_with_retry(call_fn, fallback_model), fallback_model
+        except (openai.RateLimitError, openai.NotFoundError):
+            # 🔒 MỚI -- CẢ HAI model đều không dùng được (vd cả 2 cùng bị
+            # decommission 1 đợt, như đã xảy ra thật với Groq 16/08/2026).
+            # Raise lại lỗi CỦA FALLBACK (không phải lỗi gốc của primary)
+            # để message hiển thị đúng tên model fallback vừa thử -- người
+            # dùng cần biết CẢ HAI đều hỏng, không chỉ 1.
+            raise
 
 
 class OpenAICompatProvider(AIProvider):
@@ -242,11 +419,22 @@ class OpenAICompatProvider(AIProvider):
             return self._client.chat.completions.create(**kwargs)
 
         try:
-            response, _used_model = _call_with_rate_limit_fallback(
+            response, _used_model = _call_with_fallback(
                 _call, self._translate_model, self._translate_fallback_model, error_label,
             )
         except openai.AuthenticationError as exc:
             raise ProviderError(self._auth_error_hint(error_label, exc)) from exc
+        except openai.APIConnectionError as exc:
+            # 🔒 MỚI (Backlog #2, CONTRACTS.md Mục 29) -- lỗi kết nối mạng
+            # TẠM THỜI, đã tự động retry (xem _call_with_retry) nhưng vẫn
+            # không thành công sau hết số lần thử -- thông báo RÕ đây là
+            # lỗi mạng (khác lỗi cấu hình/API) + đã tự thử lại bao nhiêu
+            # lần, để người dùng không tốn công debug nhầm hướng.
+            raise ProviderError(
+                f"{self._provider_label} {error_label} lỗi kết nối mạng (đã tự "
+                f"động thử lại {_TRANSIENT_NETWORK_MAX_RETRIES} lần, không "
+                f"thành công) — kiểm tra lại kết nối Internet rồi thử lại: {exc}"
+            ) from exc
         except openai.OpenAIError as exc:
             raise ProviderError(f"{self._provider_label} {error_label} API lỗi: {exc}") from exc
         except Exception as exc:
@@ -340,7 +528,11 @@ class OpenAICompatProvider(AIProvider):
         )
 
     def suggest_answer(
-        self, question_text: str, context_text: str, user_native_lang: str
+        self,
+        question_text: str,
+        context_text: str,
+        user_native_lang: str,
+        meeting_context: str = "",
     ) -> str:
         """Xem docstring đầy đủ ở AIProvider.suggest_answer().
 
@@ -348,9 +540,18 @@ class OpenAICompatProvider(AIProvider):
         đợt refactor multi-provider — bao gồm lưới an toàn chống trả lời
         sai ngôn ngữ (CONTRACTS.md Mục 15), chỉ đổi vị trí file để dùng
         CHUNG cho Groq/OpenAI/Gemini.
+
+        🔒 MỚI (Vòng 9, CONTRACTS.md Mục 18): `meeting_context` (nếu có)
+        được nhét vào SYSTEM PROMPT (qua `_build_suggest_answer_system_prompt`),
+        KHÔNG nhét vào `user_content` — vì đây là bối cảnh CỐ ĐỊNH cho cả
+        phiên họp, tách bạch với `context_text` (cửa sổ trượt vài câu gần
+        nhất, vẫn ở user_content như cũ). Đặt ở system_prompt còn có lợi
+        ích PHỤ: lần retry chống sai ngôn ngữ bên dưới tái dùng NGUYÊN
+        `system_prompt` đã build sẵn, nên bối cảnh cuộc họp tự động được
+        giữ lại ở lần retry mà không cần sửa gì thêm ở đó.
         """
         native_name = _language_name(user_native_lang)
-        system_prompt = self._build_suggest_answer_system_prompt(native_name)
+        system_prompt = self._build_suggest_answer_system_prompt(native_name, meeting_context)
         user_content = (
             f"Recent conversation context:\n{context_text}\n\n"
             f"What was just said (needs a response): {question_text}\n\n"
@@ -386,11 +587,18 @@ class OpenAICompatProvider(AIProvider):
         return answer
 
     @staticmethod
-    def _build_suggest_answer_system_prompt(native_name: str) -> str:
+    def _build_suggest_answer_system_prompt(native_name: str, meeting_context: str = "") -> str:
         """Tách riêng thành method để TÁI DÙNG nguyên giữa lần gọi đầu và
         lần retry (CONTRACTS.md Mục 15) — tránh lặp đoạn prompt dài 2 lần
-        trong suggest_answer(), dễ đọc/sửa hơn khi cần tinh chỉnh tiếp."""
-        return (
+        trong suggest_answer(), dễ đọc/sửa hơn khi cần tinh chỉnh tiếp.
+
+        `meeting_context` (🔒 MỚI Vòng 9, mặc định "" — xem CONTRACTS.md
+        Mục 18) được nối vào CUỐI prompt, tách riêng bằng heading rõ ràng,
+        kèm hướng dẫn rõ: chỉ dùng để HIỂU tình huống, không phải nguồn sự
+        thật để trích dẫn/lặp lại nguyên văn, và không được để nó GHI ĐÈ
+        luật ngôn ngữ đầu ra ở trên (đặt SAU luật đó trong prompt, không
+        đặt trước, để tránh model "quên" luật ngôn ngữ nếu bối cảnh dài)."""
+        base_prompt = (
             f"OUTPUT LANGUAGE RULE (read this first, it overrides everything "
             f"else below): write your ENTIRE reply in {native_name}, no "
             f"matter what language the conversation below is in. Whether the "
@@ -428,6 +636,53 @@ class OpenAICompatProvider(AIProvider):
             f"conversation's language.\n\n"
             f"Output ONLY the reply text, no explanation, no quotes — and "
             f"remember: {native_name} only, never the conversation's language."
+        )
+        if meeting_context:
+            base_prompt += (
+                f"\n\nBACKGROUND CONTEXT for this whole meeting (given by the "
+                f"user BEFORE it started, describing who is speaking, the "
+                f"setting/purpose — e.g. a job interview, a game, a specific "
+                f"work situation): use this ONLY to understand the situation "
+                f"and pick a more fitting, relevant reply. Do NOT quote or "
+                f"repeat this context verbatim, do NOT treat it as a factual "
+                f"source to cite numbers/names from, and it NEVER overrides "
+                f"the output language rule above.\n{meeting_context}"
+            )
+        return base_prompt
+
+    def chat(self, messages: list[dict], user_native_lang: str) -> str:
+        """🔒 ĐÃ CHỐT (CONTRACTS.md Mục 21) — xem docstring đầy đủ ở
+        `AIProvider.chat()`. Dùng lại `_chat_complete()` (cùng cơ chế
+        fallback 429/404 với translate()/suggest_answer()/summarize()) —
+        chỉ khác ở system prompt (định danh trợ lý chat tự do, không phải
+        "soạn câu trả lời hộ trong cuộc họp") và KHÔNG áp lưới an toàn
+        "sai script" của suggest_answer() (xem lý do ở CONTRACTS.md Mục 21
+        — chat tự do có thể hợp lệ trả lời xen ngôn ngữ khác nếu người
+        dùng chủ động yêu cầu, vd nhờ dịch 1 câu).
+        """
+        native_name = _language_name(user_native_lang)
+        system_prompt = (
+            f"You are a helpful, knowledgeable assistant having a free-form "
+            f"conversation with the user inside a meeting-companion app — "
+            f"this is a general side-chat, separate from the live meeting "
+            f"transcript.\n\n"
+            f"OUTPUT LANGUAGE RULE: reply in {native_name} by default, no "
+            f"matter what language the user writes in — UNLESS the user "
+            f"explicitly asks you to write in a different language (e.g. "
+            f"asks you to translate something, or write a phrase in another "
+            f"language on purpose) — in that case follow their explicit "
+            f"request for that specific part.\n\n"
+            f"You answer from your own general knowledge. You do NOT have "
+            f"real-time web access or up-to-date news — if the question "
+            f"needs current events, live data, or very recent facts you "
+            f"cannot be sure of, say so plainly instead of guessing or "
+            f"inventing an answer. Be concise and direct; do not pad your "
+            f"reply with unnecessary preamble."
+        )
+        api_messages: list[dict] = [{"role": "system", "content": system_prompt}]
+        api_messages.extend(messages)
+        return self._chat_complete(
+            messages=api_messages, error_label="chat", temperature=0.5,
         )
 
     def summarize(self, transcript_text: str, user_native_lang: str) -> SummaryResult:

@@ -21,6 +21,7 @@ này, chỉ gọi feed()/flush().
 
 from __future__ import annotations
 
+import os
 from typing import List, Optional
 
 import numpy as np
@@ -222,3 +223,57 @@ class VadSegmenter:
         self._pre_buffer = []
         self._silence_run = 0
         self._speech_frame_count = 0
+
+
+# 🔒 MỚI (Mục 27 — phản hồi thảo luận về xử lý tạp âm, xem CONTRACTS.md
+# Mục 27): trước đây `VadSegmenter(samplerate=16000)` ở `ui/main_window.py`
+# hardcode CỨNG mọi tham số (aggressiveness/silence_ms/...) — muốn tinh
+# chỉnh khi gặp tạp âm thật (VD tăng aggressiveness để bớt cắt nhầm) PHẢI
+# sửa code + build lại app. Hàm này đọc override qua `.env` theo ĐÚNG tinh
+# thần 3 tầng ưu tiên đã dùng ở `GroqProvider.__init__`
+# (tham số trực tiếp > biến môi trường > hardcode default trong code) —
+# NHƯNG đặt Ở NGOÀI class `VadSegmenter` (không sửa `__init__` của class),
+# giữ đúng nguyên tắc đã ghi trong docstring đầu file: VadSegmenter là 1
+# state machine THUẦN, không biết/không cần biết gì về môi trường ngoài
+# (Qt, threading, ENV...) — dễ test bằng tham số tường minh, không cần
+# monkeypatch `os.environ` để test logic cắt segment.
+#
+# Đây LÀ đúng giới hạn của việc này: chỉ giúp BẠN tự tinh chỉnh số dễ hơn
+# khi gặp tạp âm thật, KHÔNG tự động giải quyết được cả 3 vấn đề tạp âm đã
+# nêu (VAD cắt nhầm / STT nghe sai / tạp âm hiện thành bubble) — 2 vấn đề
+# sau CẦN khử nhiễu audio thật sự (đã trao đổi, để dành, KHÔNG làm ở đây)
+# hoặc audio mẫu thật để biết chỉnh đúng hướng.
+def create_vad_segmenter_from_env(samplerate: int = 16000) -> "VadSegmenter":
+    """Tạo `VadSegmenter` với các tham số đọc từ biến môi trường (nếu có),
+    fallback về đúng default hiện tại của `VadSegmenter.__init__` khi biến
+    môi trường không đặt HOẶC đặt sai định dạng (không parse được số) —
+    KHÔNG BAO GIỜ raise lỗi chỉ vì 1 giá trị `.env` gõ sai, để không làm
+    app không khởi động được vì 1 lỗi gõ nhầm số trong file cấu hình.
+
+    Biến môi trường hỗ trợ (đều optional, xem ý nghĩa từng số ở
+    `VadSegmenter.__init__`): `VAD_AGGRESSIVENESS` (int 0-3),
+    `VAD_SILENCE_MS`, `VAD_MIN_SPEECH_MS`, `VAD_MAX_SEGMENT_MS`,
+    `VAD_PADDING_MS` (đều int, đơn vị ms).
+
+    Validation (vd `aggressiveness` ngoài 0-3) vẫn do
+    `VadSegmenter.__init__` tự raise `VadSegmenterError` như cũ — hàm này
+    chỉ lo đọc/parse env, không lặp lại logic validate.
+    """
+
+    def _env_int(name: str, default: int) -> int:
+        raw = os.environ.get(name)
+        if raw is None or not raw.strip():
+            return default
+        try:
+            return int(raw.strip())
+        except ValueError:
+            return default
+
+    return VadSegmenter(
+        samplerate=samplerate,
+        aggressiveness=_env_int("VAD_AGGRESSIVENESS", 2),
+        silence_ms=_env_int("VAD_SILENCE_MS", 350),
+        min_speech_ms=_env_int("VAD_MIN_SPEECH_MS", 250),
+        max_segment_ms=_env_int("VAD_MAX_SEGMENT_MS", 8000),
+        padding_ms=_env_int("VAD_PADDING_MS", 200),
+    )

@@ -25,6 +25,8 @@ import numpy as np  # noqa: E402
 import httpx  # noqa: E402
 import openai  # noqa: E402
 
+from app import config_store  # noqa: E402
+from app.ai import openai_compat_base  # noqa: E402
 from app.ai.base_provider import ProviderError  # noqa: E402
 from app.ai.groq_provider import (  # noqa: E402
     GroqProvider,
@@ -291,14 +293,180 @@ def test_transcribe_wrap_loi_thanh_provider_error():
 
 
 # --------------------------------------------------------------------------
-# 2b. Fallback model tự động khi gặp 429 rate limit (ưu tiên chính xác
-#     nhất ở model chính, vẫn linh hoạt/free khi hết quota tạm thời) --
-#     xem docstring GroqProvider + _call_with_rate_limit_fallback.
+# 2b. Fallback model tự động khi gặp 429 (rate limit) hoặc 404 (model bị
+#     decommission, 🔒 MỚI 02/09/2026, CONTRACTS.md Mục 19) -- ưu tiên
+#     chính xác nhất ở model chính, vẫn linh hoạt/free khi hết quota tạm
+#     thời HOẶC khi model chính bị nhà cung cấp ngừng hỗ trợ -- xem
+#     docstring GroqProvider + _call_with_fallback.
 # --------------------------------------------------------------------------
+
+def _make_fake_rate_limit_error(message: str = "Rate limit reached") -> openai.RateLimitError:
+    """🔒 SỬA (02/09/2026) -- SDK `openai` hiện tại (2.x) BẮT BUỘC `message`
+    làm tham số dương đầu tiên cho mọi APIStatusError (kể cả RateLimitError
+    kế thừa từ đó) -- gọi `openai.RateLimitError(response=None, body=None)`
+    như code CŨ ở đây (thiếu message) từng chạy được với SDK cũ hơn lúc
+    viết test, giờ raise `TypeError` ngay khi TẠO exception giả (KHÔNG
+    phải lỗi thật đang test) trên SDK mới hơn user đang cài (2.44.0, xem
+    log lỗi user gửi) -- đây là VẤN ĐỀ CỦA TEST, không phải bug app. Cùng
+    pattern `httpx.Response` thật như `_make_fake_auth_error()` bên dưới,
+    để chắc chắn khớp đúng constructor SDK thật đang cài, không đoán mò."""
+    resp = httpx.Response(
+        status_code=429,
+        request=httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions"),
+    )
+    return openai.RateLimitError(
+        message, response=resp,
+        body={"error": {"message": message, "type": "invalid_request_error", "code": "rate_limit_exceeded"}},
+    )
+
+
+def _make_fake_not_found_error(model: str = "model-da-bi-decommission") -> openai.NotFoundError:
+    """🔒 MỚI (02/09/2026) -- mô phỏng ĐÚNG lỗi 404 thật user đã gặp khi
+    Groq decommission `llama-3.3-70b-versatile` (xem CONTRACTS.md Mục 19):
+    `{'error': {'message': 'The model `...` does not exist or you do not
+    have access to it.', 'type': 'invalid_request_error', 'code':
+    'model_not_found'}}`."""
+    message = f"The model `{model}` does not exist or you do not have access to it."
+    resp = httpx.Response(
+        status_code=404,
+        request=httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions"),
+    )
+    return openai.NotFoundError(
+        message, response=resp,
+        body={"error": {"message": message, "type": "invalid_request_error", "code": "model_not_found"}},
+    )
+
+
+def _make_fake_connection_error(message: str = "Connection error.") -> openai.APIConnectionError:
+    """🔒 MỚI (Backlog #2, CONTRACTS.md Mục 29) -- mô phỏng lỗi kết nối
+    mạng TẠM THỜI (khác 429/404/401 ở trên -- đây là lỗi Ở TẦNG KẾT NỐI,
+    KHÔNG có response HTTP thật để gắn vào, chỉ cần `request` theo đúng
+    constructor SDK thật (xem `inspect.signature(openai.APIConnectionError.__init__)`
+    đã tự kiểm tra: chỉ nhận `message`/`request`, KHÔNG nhận `response`/`body`
+    như RateLimitError/NotFoundError ở trên -- APIConnectionError xảy ra
+    TRƯỚC KHI có response nào để đọc)."""
+    return openai.APIConnectionError(
+        message=message,
+        request=httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions"),
+    )
+
+
+# --------------------------------------------------------------------------
+# 2c. 🔒 MỚI (Backlog #2, CONTRACTS.md Mục 29) -- retry có backoff cho lỗi
+#     kết nối mạng TẠM THỜI (openai.APIConnectionError) -- GIỮ NGUYÊN model
+#     (khác 2b ở trên, vốn ĐỔI model). Monkeypatch `_sleep_backoff` module-
+#     level (module `app.ai.openai_compat_base`, KHÔNG phải tên re-export
+#     trong `groq_provider` -- `_call_with_retry()`/`_retry_with_backoff()`
+#     gọi `_sleep_backoff` qua ĐÚNG namespace module định nghĩa nó lúc
+#     chạy, patch bản re-export ở `groq_provider` KHÔNG có tác dụng gì, vẫn
+#     sleep thật) để test không chạy chậm vì backoff cộng dồn vài giây.
+# --------------------------------------------------------------------------
+
+def test_chat_complete_retry_thanh_cong_sau_2_lan_loi_ket_noi_tam_thoi():
+    completions = _FakeSequencedCompletions([
+        _make_fake_connection_error(),
+        _make_fake_connection_error(),
+        _FakeChatResponse(content="ok sau khi retry"),
+    ])
+    fake_client = _FakeClient(chat=_FakeChat(completions))
+    provider = _make_provider_with_fake_client(
+        fake_client, translate_model="model-chinh", translate_fallback_model="model-phu",
+    )
+    original_sleep = openai_compat_base._sleep_backoff
+    sleeps: list[float] = []
+    openai_compat_base._sleep_backoff = lambda seconds: sleeps.append(seconds)
+    try:
+        result = provider.translate("hi", source_lang="en", target_lang="vi")
+    finally:
+        openai_compat_base._sleep_backoff = original_sleep
+    assert result == "ok sau khi retry"
+    assert completions.called_models == ["model-chinh", "model-chinh", "model-chinh"], (
+        f"Retry PHẢI giữ nguyên model (KHÔNG đổi sang model-phu như fallback "
+        f"429/404), nhận {completions.called_models}."
+    )
+    assert sleeps == [1.0, 2.0], f"Backoff phải tăng dần 1s -> 2s, nhận {sleeps}."
+    print("OK: test_chat_complete_retry_thanh_cong_sau_2_lan_loi_ket_noi_tam_thoi")
+
+
+def test_chat_complete_het_luot_retry_van_loi_ket_noi_raise_provider_error_ro_rang():
+    completions = _FakeSequencedCompletions([
+        _make_fake_connection_error(),
+        _make_fake_connection_error(),
+        _make_fake_connection_error(),  # lần gọi thứ 3 (đã hết 2 lần retry) vẫn lỗi
+    ])
+    fake_client = _FakeClient(chat=_FakeChat(completions))
+    provider = _make_provider_with_fake_client(
+        fake_client, translate_model="model-chinh", translate_fallback_model="model-phu",
+    )
+    original_sleep = openai_compat_base._sleep_backoff
+    openai_compat_base._sleep_backoff = lambda seconds: None
+    try:
+        try:
+            provider.translate("hi", source_lang="en", target_lang="vi")
+            raise AssertionError("Phải raise ProviderError sau khi hết lượt retry.")
+        except ProviderError as exc:
+            assert "kết nối mạng" in str(exc), f"Message phải nói rõ là lỗi kết nối mạng, nhận: {exc}"
+            assert "2 lần" in str(exc), f"Message phải nêu rõ số lần đã thử lại, nhận: {exc}"
+    finally:
+        openai_compat_base._sleep_backoff = original_sleep
+    assert completions.called_models == ["model-chinh", "model-chinh", "model-chinh"], (
+        "KHÔNG được đổi sang model-phu khi lỗi là kết nối mạng (đổi model "
+        f"không sửa được lỗi mạng), nhận {completions.called_models}."
+    )
+    print("OK: test_chat_complete_het_luot_retry_van_loi_ket_noi_raise_provider_error_ro_rang")
+
+
+def test_transcribe_retry_ket_noi_mang_giu_nguyen_model_khong_fallback():
+    fake_transcription = _FakeTranscriptionResponse(
+        text="hello", language="en",
+        segments=[_FakeSegment(avg_logprob=-0.1, no_speech_prob=0.0)],
+    )
+    transcriptions = _FakeSequencedTranscriptions([
+        _make_fake_connection_error(),
+        fake_transcription,
+    ])
+    fake_client = _FakeClient(audio=_FakeAudio(transcriptions))
+    provider = _make_provider_with_fake_client(
+        fake_client, stt_model="stt-chinh", stt_fallback_model="stt-phu",
+    )
+    original_sleep = openai_compat_base._sleep_backoff
+    openai_compat_base._sleep_backoff = lambda seconds: None
+    try:
+        result = provider.transcribe(np.zeros(1600, dtype=np.float32), samplerate=16000)
+    finally:
+        openai_compat_base._sleep_backoff = original_sleep
+    assert result.text == "hello"
+    assert transcriptions.called_models == ["stt-chinh", "stt-chinh"], (
+        f"transcribe() cũng phải retry giữ nguyên model, KHÔNG đổi sang "
+        f"stt-phu (đó là hành vi fallback 429/404, khác retry), nhận "
+        f"{transcriptions.called_models}."
+    )
+    print("OK: test_transcribe_retry_ket_noi_mang_giu_nguyen_model_khong_fallback")
+
+
+def test_retry_khong_ap_dung_cho_loi_khac_ket_noi_mang():
+    # Đối chứng quan trọng: lỗi 429 vẫn phải FALLBACK model như cũ (Mục 2b),
+    # KHÔNG bị đổi hành vi thành "retry cùng model" chỉ vì thêm lớp retry mới.
+    completions = _FakeSequencedCompletions([
+        _make_fake_rate_limit_error(),
+        _FakeChatResponse(content="ok tu fallback, khong phai retry"),
+    ])
+    fake_client = _FakeClient(chat=_FakeChat(completions))
+    provider = _make_provider_with_fake_client(
+        fake_client, translate_model="model-chinh", translate_fallback_model="model-phu",
+    )
+    result = provider.translate("hi", source_lang="en", target_lang="vi")
+    assert result == "ok tu fallback, khong phai retry"
+    assert completions.called_models == ["model-chinh", "model-phu"], (
+        f"429 phải vẫn ĐỔI model (fallback), không retry cùng model, nhận "
+        f"{completions.called_models}."
+    )
+    print("OK: test_retry_khong_ap_dung_cho_loi_khac_ket_noi_mang")
+
 
 def test_chat_complete_fallback_sang_model_phu_khi_429():
     completions = _FakeSequencedCompletions([
-        openai.RateLimitError(response=None, body=None),
+        _make_fake_rate_limit_error(),
         _FakeChatResponse(content="ok tu fallback"),
     ])
     fake_client = _FakeClient(chat=_FakeChat(completions))
@@ -311,6 +479,49 @@ def test_chat_complete_fallback_sang_model_phu_khi_429():
         f"Phải gọi model-chinh trước, model-phu sau khi 429, nhận {completions.called_models}."
     )
     print("OK: test_chat_complete_fallback_sang_model_phu_khi_429")
+
+
+def test_chat_complete_fallback_sang_model_phu_khi_404_model_decommissioned():
+    """🔒 MỚI (02/09/2026, CONTRACTS.md Mục 19) -- đúng kịch bản thật user
+    đã gặp: model_chính bị Groq decommission (404 model_not_found), phải
+    tự động thử model_phu, KHÔNG raise cứng ngay như trước 02/09/2026."""
+    completions = _FakeSequencedCompletions([
+        _make_fake_not_found_error(model="model-chinh"),
+        _FakeChatResponse(content="ok tu fallback sau khi model chinh bi decommission"),
+    ])
+    fake_client = _FakeClient(chat=_FakeChat(completions))
+    provider = _make_provider_with_fake_client(
+        fake_client, translate_model="model-chinh", translate_fallback_model="model-phu",
+    )
+    result = provider.translate("hi", source_lang="en", target_lang="vi")
+    assert result == "ok tu fallback sau khi model chinh bi decommission"
+    assert completions.called_models == ["model-chinh", "model-phu"]
+    print("OK: test_chat_complete_fallback_sang_model_phu_khi_404_model_decommissioned")
+
+
+def test_chat_complete_ca_2_model_deu_404_raise_provider_error_ro_rang():
+    """🔒 MỚI -- kịch bản XẤU NHẤT: CẢ 2 model đều bị decommission cùng
+    lúc (từng xảy ra thật -- Groq decommission cả llama-3.3-70b-versatile
+    VÀ llama-3.1-8b-instant cùng 1 đợt 16/08/2026) -- phải raise
+    ProviderError rõ ràng, KHÔNG treo/lặp vô hạn/trả kết quả giả."""
+    completions = _FakeSequencedCompletions([
+        _make_fake_not_found_error(model="model-chinh"),
+        _make_fake_not_found_error(model="model-phu"),
+    ])
+    fake_client = _FakeClient(chat=_FakeChat(completions))
+    provider = _make_provider_with_fake_client(
+        fake_client, translate_model="model-chinh", translate_fallback_model="model-phu",
+    )
+    try:
+        provider.translate("hi", source_lang="en", target_lang="vi")
+        raise AssertionError("Phải raise ProviderError khi cả 2 model đều bị decommission (404).")
+    except ProviderError as exc:
+        assert "model-phu" in str(exc), (
+            f"Message lỗi phải nhắc tới model-phu (model fallback vừa thử "
+            f"cuối cùng), nhận: {exc}"
+        )
+    assert completions.called_models == ["model-chinh", "model-phu"]
+    print("OK: test_chat_complete_ca_2_model_deu_404_raise_provider_error_ro_rang")
 
 
 def test_chat_complete_khong_fallback_cho_loi_khac_429():
@@ -335,8 +546,8 @@ def test_chat_complete_khong_fallback_cho_loi_khac_429():
 
 def test_chat_complete_ca_2_model_deu_429_raise_provider_error():
     completions = _FakeSequencedCompletions([
-        openai.RateLimitError(response=None, body=None),
-        openai.RateLimitError(response=None, body=None),
+        _make_fake_rate_limit_error(),
+        _make_fake_rate_limit_error(),
     ])
     fake_client = _FakeClient(chat=_FakeChat(completions))
     provider = _make_provider_with_fake_client(
@@ -353,7 +564,7 @@ def test_chat_complete_ca_2_model_deu_429_raise_provider_error():
 
 def test_chat_complete_khong_fallback_khi_fallback_model_trung_model_chinh():
     completions = _FakeSequencedCompletions([
-        openai.RateLimitError(response=None, body=None),
+        _make_fake_rate_limit_error(),
     ])
     fake_client = _FakeClient(chat=_FakeChat(completions))
     provider = _make_provider_with_fake_client(
@@ -376,7 +587,7 @@ def test_transcribe_fallback_sang_model_phu_khi_429():
         segments=[_FakeSegment(avg_logprob=-0.1, no_speech_prob=0.0)],
     )
     transcriptions = _FakeSequencedTranscriptions([
-        openai.RateLimitError(response=None, body=None),
+        _make_fake_rate_limit_error(),
         fake_transcription,
     ])
     fake_client = _FakeClient(audio=_FakeAudio(transcriptions))
@@ -434,12 +645,28 @@ def test_translate_response_rong_raise_provider_error():
 
 
 def test_init_thieu_api_key_raise_provider_error():
+    # 🔒 SỬA (Mục 25, phát hiện trên máy dev thật): trước đây test này KHÔNG
+    # cách ly `config_store.load_api_key` -- nếu máy chạy test đã lưu sẵn 1
+    # Groq API key thật qua ⚙️ Cài đặt (Settings UI, xem CONTRACTS.md Mục
+    # 12), GroqProvider(api_key=None) đọc được key thật đó từ config.json,
+    # KHÔNG raise ProviderError như test kỳ vọng -> false failure, không
+    # liên quan gì tới code vừa sửa. Cùng nguyên nhân/cùng cách fix đã áp
+    # dụng ở test_init_thieu_key_raise_provider_error_voi_huong_dan_openai
+    # (tests/test_openai_provider_offline.py) và tương đương ở
+    # tests/test_gemini_provider_offline.py -- monkeypatch
+    # config_store.load_api_key trả None trong lúc test, khôi phục lại ở
+    # finally để không ảnh hưởng test khác.
     os.environ.pop("GROQ_API_KEY", None)
+    original_load = config_store.load_api_key
+    config_store.load_api_key = lambda provider="groq", base_dir=None: None  # noqa: E731
     try:
-        GroqProvider(api_key=None)
-        raise AssertionError("Phải raise ProviderError khi không có api_key và không có env var.")
-    except ProviderError:
-        pass
+        try:
+            GroqProvider(api_key=None)
+            raise AssertionError("Phải raise ProviderError khi không có api_key và không có env var.")
+        except ProviderError:
+            pass
+    finally:
+        config_store.load_api_key = original_load
     print("OK: test_init_thieu_api_key_raise_provider_error")
 
 
@@ -580,6 +807,33 @@ def test_looks_like_wrong_script_phat_hien_dung_case_thuc_te_da_gap():
     print("OK: test_looks_like_wrong_script_phat_hien_dung_case_thuc_te_da_gap")
 
 
+def test_looks_like_wrong_script_ho_tro_ja_ko():
+    """🔒 MỚI (CONTRACTS.md Mục 22) — thêm native_lang ja/ko, kèm lưới an
+    toàn "sai script" đúng đặc trưng: Kanji hợp lệ trong cả câu tiếng Nhật
+    lẫn tiếng Hàn (Hanja) -- KHÔNG được coi là "lệch"; chỉ Hangul lẫn vào
+    câu tiếng Nhật, hoặc Kana lẫn vào câu tiếng Hàn, mới là dấu hiệu lệch
+    thật."""
+    from app.ai.groq_provider import _looks_like_wrong_script
+
+    japanese_answer = "それは大切なことだと思いますね、自分自身を受け入れることができると。"
+    korean_answer = "과탑이세요? 그러면 오늘은 과탑 교수님으로 보이네요."
+    chinese_answer = "假设这句话是在描述一个人态度很冷漠，可能会说这个人很冷漠。"
+
+    # native_lang="ja", trả lời ĐÚNG tiếng Nhật (Kana+Kanji) -- không báo nhầm.
+    assert _looks_like_wrong_script(japanese_answer, "ja") is False
+    # native_lang="ja" nhưng model lại trả lời tiếng Hàn -- phải bắt được.
+    assert _looks_like_wrong_script(korean_answer, "ja") is True
+    # Thuần chữ Hán (không Kana) vẫn KHÔNG bị báo nhầm cho native_lang="ja"
+    # (Kanji hợp lệ trong tiếng Nhật, không coi là script lạ).
+    assert _looks_like_wrong_script(chinese_answer, "ja") is False
+
+    # native_lang="ko", trả lời ĐÚNG tiếng Hàn (Hangul) -- không báo nhầm.
+    assert _looks_like_wrong_script(korean_answer, "ko") is False
+    # native_lang="ko" nhưng model lại trả lời tiếng Nhật -- phải bắt được.
+    assert _looks_like_wrong_script(japanese_answer, "ko") is True
+    print("OK: test_looks_like_wrong_script_ho_tro_ja_ko")
+
+
 def test_suggest_answer_system_prompt_co_output_language_rule_ro_rang():
     # Không gọi network -- chỉ assert system prompt GỬI ĐI có nêu RÕ quy
     # tắc ngôn ngữ đầu ra ngay từ đầu (CONTRACTS.md Mục 15 -- fix prompt).
@@ -690,6 +944,103 @@ def test_suggest_answer_retry_dung_temperature_thap_hon_va_co_nhac_loi_sai():
         "User message của lần retry phải nêu rõ lần trước bị từ chối vì sai ngôn ngữ."
     )
     print("OK: test_suggest_answer_retry_dung_temperature_thap_hon_va_co_nhac_loi_sai")
+
+
+# --------------------------------------------------------------------------
+# 2d. 🔒 MỚI (CONTRACTS.md Mục 21) — chat() đa lượt, dùng kiến thức nội tại
+#     của model (KHÔNG tra cứu web).
+# --------------------------------------------------------------------------
+
+def test_chat_tra_dung_content():
+    fake_response = _FakeChatResponse(content="  Xin chào! Tôi có thể giúp gì cho bạn?  ")
+    fake_client = _FakeClient(chat=_FakeChat(_FakeChatCompletions(response=fake_response)))
+    provider = _make_provider_with_fake_client(fake_client)
+
+    result = provider.chat(
+        messages=[{"role": "user", "content": "Chào bạn"}], user_native_lang="vi",
+    )
+    assert result == "Xin chào! Tôi có thể giúp gì cho bạn?"
+    print("OK: test_chat_tra_dung_content")
+
+
+def test_chat_gui_dung_thu_tu_messages_kem_system_prompt_dau_tien():
+    captured_messages = {}
+
+    class _CapturingCompletions:
+        def create(self, **kwargs):
+            captured_messages["messages"] = kwargs["messages"]
+            return _FakeChatResponse(content="ok")
+
+    fake_client = _FakeClient(chat=_FakeChat(_CapturingCompletions()))
+    provider = _make_provider_with_fake_client(fake_client)
+
+    history = [
+        {"role": "user", "content": "Câu hỏi 1"},
+        {"role": "assistant", "content": "Trả lời 1"},
+        {"role": "user", "content": "Câu hỏi 2"},
+    ]
+    provider.chat(messages=history, user_native_lang="vi")
+
+    sent = captured_messages["messages"]
+    assert sent[0]["role"] == "system", "Phần tử đầu PHẢI là system prompt, do provider tự thêm."
+    # Lịch sử gốc phải được gửi đi NGUYÊN VẸN, đúng thứ tự, ngay sau system prompt.
+    assert sent[1:] == history, f"Lịch sử gửi lên API bị sai/lệch thứ tự: {sent[1:]!r}"
+    print("OK: test_chat_gui_dung_thu_tu_messages_kem_system_prompt_dau_tien")
+
+
+def test_chat_system_prompt_yeu_cau_dung_ngon_ngu_va_khong_bia_tin_tuc_moi():
+    captured_messages = {}
+
+    class _CapturingCompletions:
+        def create(self, **kwargs):
+            captured_messages["messages"] = kwargs["messages"]
+            return _FakeChatResponse(content="ok")
+
+    fake_client = _FakeClient(chat=_FakeChat(_CapturingCompletions()))
+    provider = _make_provider_with_fake_client(fake_client)
+    provider.chat(messages=[{"role": "user", "content": "Hi"}], user_native_lang="vi")
+
+    system_msg = captured_messages["messages"][0]["content"]
+    assert "vietnamese" in system_msg.lower(), "Phải nêu rõ ngôn ngữ đầu ra mặc định là Vietnamese."
+    assert "real-time" in system_msg.lower() or "up-to-date news" in system_msg.lower(), (
+        "Phải cảnh báo rõ model KHÔNG có khả năng tra cứu real-time/tin tức mới, "
+        "tránh model tự bịa tin tức không có thật."
+    )
+    print("OK: test_chat_system_prompt_yeu_cau_dung_ngon_ngu_va_khong_bia_tin_tuc_moi")
+
+
+def test_chat_wrap_loi_thanh_provider_error():
+    fake_client = _FakeClient(
+        chat=_FakeChat(_FakeChatCompletions(error=openai.APIConnectionError(request=None)))
+    )
+    provider = _make_provider_with_fake_client(fake_client)
+    try:
+        provider.chat(messages=[{"role": "user", "content": "Hi"}], user_native_lang="vi")
+        raise AssertionError("Phải raise ProviderError khi API lỗi.")
+    except ProviderError:
+        pass
+    print("OK: test_chat_wrap_loi_thanh_provider_error")
+
+
+def test_chat_fallback_sang_model_phu_khi_429():
+    # Cùng cơ chế fallback với _chat_complete() (đã test kỹ ở nhóm test
+    # test_chat_complete_* phía trên) -- chỉ xác nhận chat() thật sự ĐI QUA
+    # đúng _chat_complete(), không tự implement gọi API riêng.
+    sequenced = _FakeSequencedCompletions([
+        _make_fake_rate_limit_error(),
+        _FakeChatResponse(content="ok sau fallback"),
+    ])
+    fake_client = _FakeClient(chat=_FakeChat(sequenced))
+    provider = _make_provider_with_fake_client(
+        fake_client, translate_model="model-chinh", translate_fallback_model="model-phu",
+    )
+
+    result = provider.chat(messages=[{"role": "user", "content": "Hi"}], user_native_lang="vi")
+    assert result == "ok sau fallback"
+    assert sequenced.called_models == ["model-chinh", "model-phu"], (
+        f"Phải gọi model-chinh trước, model-phu sau khi 429, nhận {sequenced.called_models}."
+    )
+    print("OK: test_chat_fallback_sang_model_phu_khi_429")
 
 
 def test_summarize_parse_dung_json_thanh_summary_result():
@@ -824,19 +1175,41 @@ def _make_fake_auth_error(message: str = "Invalid API Key") -> openai.Authentica
 def test_init_voi_placeholder_key_bao_loi_ro_rang_khong_phai_401_kho_hieu():
     # Bug thật đã gặp: user để nguyên giá trị mẫu .env.example -> Groq trả
     # 401 chung, rất khó đoán nguyên nhân. Giờ phải chặn NGAY tại __init__.
+    #
+    # 🔒 SỬA (Mục 26, phát hiện qua log Windows thật của bạn NGAY SAU khi
+    # sửa Mục 25): CÙNG NGUYÊN NHÂN với Mục 25, một chỗ khác trong CÙNG
+    # file test này -- `resolved_key = api_key or config_store.load_api_key(...)
+    # or os.environ.get("GROQ_API_KEY")` đọc config_store TRƯỚC env var, nên
+    # nếu máy có key thật đã lưu qua Settings UI, key thật đó "che" luôn giá
+    # trị placeholder đặt qua env var ở đây -- GroqProvider() không raise,
+    # test fail. Mục 25 tôi chỉ soát 1 test bị báo lỗi, KHÔNG soát hết các
+    # chỗ khác trong file cùng dựa vào env var mà thiếu cách ly -- đây là
+    # lỗi rà soát chưa đủ của tôi, không phải bug mới phát sinh. Cùng cách
+    # sửa: monkeypatch config_store.load_api_key trả None.
     os.environ["GROQ_API_KEY"] = "your_groq_api_key_here"
+    original_load = config_store.load_api_key
+    config_store.load_api_key = lambda provider="groq", base_dir=None: None  # noqa: E731
     try:
-        GroqProvider()
-        raise AssertionError("Phải raise ProviderError khi key vẫn là giá trị mẫu.")
-    except ProviderError as exc:
-        assert "mẫu" in str(exc) or "console.groq.com" in str(exc)
+        try:
+            GroqProvider()
+            raise AssertionError("Phải raise ProviderError khi key vẫn là giá trị mẫu.")
+        except ProviderError as exc:
+            assert "mẫu" in str(exc) or "console.groq.com" in str(exc)
     finally:
         os.environ.pop("GROQ_API_KEY", None)
+        config_store.load_api_key = original_load
     print("OK: test_init_voi_placeholder_key_bao_loi_ro_rang_khong_phai_401_kho_hieu")
 
 
 def test_init_tu_dong_strip_quote_va_whitespace_thua():
+    # 🔒 SỬA (Mục 26) -- cùng lý do như test phía trên: nếu không cách ly,
+    # máy có key thật lưu qua Settings UI sẽ khiến provider._client.api_key
+    # là key THẬT thay vì "gsk_fake_key_for_test" mong đợi, assert fail vì
+    # lý do KHÁC hẳn (không liên quan gì đến logic strip quote/whitespace
+    # mà test này thật sự muốn xác nhận).
     os.environ["GROQ_API_KEY"] = '  "gsk_fake_key_for_test"  \n'
+    original_load = config_store.load_api_key
+    config_store.load_api_key = lambda provider="groq", base_dir=None: None  # noqa: E731
     try:
         provider = GroqProvider()
         assert provider._client.api_key == "gsk_fake_key_for_test", (
@@ -844,7 +1217,66 @@ def test_init_tu_dong_strip_quote_va_whitespace_thua():
         )
     finally:
         os.environ.pop("GROQ_API_KEY", None)
+        config_store.load_api_key = original_load
     print("OK: test_init_tu_dong_strip_quote_va_whitespace_thua")
+
+
+_CLIENT_TIMEOUT_ENV_VAR = "GROQ_CLIENT_TIMEOUT_SECONDS"
+
+
+def test_client_timeout_mac_dinh_khong_phai_600_giay_cua_sdk():
+    # 🔒 MỚI (Backlog #1, CONTRACTS.md Mục 28) -- SDK `openai` mặc định
+    # KHÔNG set timeout tường minh, rơi vào default ~600s (10 phút) của
+    # httpx bên dưới -- xác nhận app đã tự set timeout tường minh THẤP HƠN
+    # HẲN default đó, không phải vô tình dùng lại default nguy hiểm.
+    os.environ.pop(_CLIENT_TIMEOUT_ENV_VAR, None)
+    provider = GroqProvider(api_key="fake-key-for-test")
+    assert provider._client.timeout == 30.0, (
+        f"Default timeout mong đợi 30.0s, nhận {provider._client.timeout!r}"
+    )
+    print("OK: test_client_timeout_mac_dinh_khong_phai_600_giay_cua_sdk")
+
+
+def test_client_timeout_tham_so_truyen_truc_tiep_duoc_ton_trong():
+    os.environ.pop(_CLIENT_TIMEOUT_ENV_VAR, None)
+    provider = GroqProvider(api_key="fake-key-for-test", client_timeout_seconds=5.0)
+    assert provider._client.timeout == 5.0
+    print("OK: test_client_timeout_tham_so_truyen_truc_tiep_duoc_ton_trong")
+
+
+def test_client_timeout_doc_tu_bien_moi_truong_khi_khong_truyen_tham_so():
+    os.environ[_CLIENT_TIMEOUT_ENV_VAR] = "12.5"
+    try:
+        provider = GroqProvider(api_key="fake-key-for-test")
+        assert provider._client.timeout == 12.5
+    finally:
+        os.environ.pop(_CLIENT_TIMEOUT_ENV_VAR, None)
+    print("OK: test_client_timeout_doc_tu_bien_moi_truong_khi_khong_truyen_tham_so")
+
+
+def test_client_timeout_tham_so_uu_tien_hon_env():
+    os.environ[_CLIENT_TIMEOUT_ENV_VAR] = "12.5"
+    try:
+        provider = GroqProvider(api_key="fake-key-for-test", client_timeout_seconds=7.0)
+        assert provider._client.timeout == 7.0, "Tham số truyền trực tiếp phải thắng env"
+    finally:
+        os.environ.pop(_CLIENT_TIMEOUT_ENV_VAR, None)
+    print("OK: test_client_timeout_tham_so_uu_tien_hon_env")
+
+
+def test_client_timeout_env_sai_dinh_dang_hoac_am_fallback_default():
+    # Gõ nhầm .env (chữ, hoặc số <= 0 vô nghĩa cho 1 timeout) KHÔNG được
+    # làm app crash hay dùng timeout vô nghĩa -- fallback default 30.0s.
+    for bad_value in ("not-a-number", "", "-5", "0"):
+        os.environ[_CLIENT_TIMEOUT_ENV_VAR] = bad_value
+        try:
+            provider = GroqProvider(api_key="fake-key-for-test")
+            assert provider._client.timeout == 30.0, (
+                f"Env={bad_value!r} phải fallback 30.0s, nhận {provider._client.timeout!r}"
+            )
+        finally:
+            os.environ.pop(_CLIENT_TIMEOUT_ENV_VAR, None)
+    print("OK: test_client_timeout_env_sai_dinh_dang_hoac_am_fallback_default")
 
 
 def test_transcribe_401_tra_message_huong_dan_ro_rang():
@@ -892,7 +1324,13 @@ if __name__ == "__main__":
     test_transcribe_chuan_hoa_language_tu_full_word_nhu_du_lieu_thuc()
     test_normalize_language_voi_du_lieu_thuc_te_tu_groq()
     test_transcribe_wrap_loi_thanh_provider_error()
+    test_chat_complete_retry_thanh_cong_sau_2_lan_loi_ket_noi_tam_thoi()
+    test_chat_complete_het_luot_retry_van_loi_ket_noi_raise_provider_error_ro_rang()
+    test_transcribe_retry_ket_noi_mang_giu_nguyen_model_khong_fallback()
+    test_retry_khong_ap_dung_cho_loi_khac_ket_noi_mang()
     test_chat_complete_fallback_sang_model_phu_khi_429()
+    test_chat_complete_fallback_sang_model_phu_khi_404_model_decommissioned()
+    test_chat_complete_ca_2_model_deu_404_raise_provider_error_ro_rang()
     test_chat_complete_khong_fallback_cho_loi_khac_429()
     test_chat_complete_ca_2_model_deu_429_raise_provider_error()
     test_chat_complete_khong_fallback_khi_fallback_model_trung_model_chinh()
@@ -903,6 +1341,11 @@ if __name__ == "__main__":
     test_init_thieu_api_key_raise_provider_error()
     test_init_voi_placeholder_key_bao_loi_ro_rang_khong_phai_401_kho_hieu()
     test_init_tu_dong_strip_quote_va_whitespace_thua()
+    test_client_timeout_mac_dinh_khong_phai_600_giay_cua_sdk()
+    test_client_timeout_tham_so_truyen_truc_tiep_duoc_ton_trong()
+    test_client_timeout_doc_tu_bien_moi_truong_khi_khong_truyen_tham_so()
+    test_client_timeout_tham_so_uu_tien_hon_env()
+    test_client_timeout_env_sai_dinh_dang_hoac_am_fallback_default()
     test_transcribe_401_tra_message_huong_dan_ro_rang()
     test_translate_401_tra_message_huong_dan_ro_rang()
     test_suggest_answer_tra_dung_content_va_dung_prompt_yeu_cau_khong_bia_so_lieu()
@@ -922,4 +1365,10 @@ if __name__ == "__main__":
     test_summarize_dung_response_format_json_object()
     test_summarize_json_khong_hop_le_raise_provider_error()
     test_summarize_json_thieu_field_raise_provider_error()
+    test_chat_tra_dung_content()
+    test_chat_gui_dung_thu_tu_messages_kem_system_prompt_dau_tien()
+    test_chat_system_prompt_yeu_cau_dung_ngon_ngu_va_khong_bia_tin_tuc_moi()
+    test_chat_wrap_loi_thanh_provider_error()
+    test_chat_fallback_sang_model_phu_khi_429()
+    test_looks_like_wrong_script_ho_tro_ja_ko()
     print("\n=== TẤT CẢ TEST GROQ_PROVIDER (OFFLINE/MOCK) PASS ===")

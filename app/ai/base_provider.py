@@ -95,10 +95,14 @@ class AIProvider(ABC):
           ngược, không cần method riêng.
         - summarize(): 🔒 ĐÃ CHỐT (Phase 3, F10-F11) — chốt khi bắt đầu
           Phase 3 Bước 1.
+        - chat(): 🔒 ĐÃ CHỐT (CONTRACTS.md Mục 21) — hỏi-đáp tự do đa lượt
+          dùng kiến thức nội tại model, KHÔNG tra cứu web.
     """
 
     @abstractmethod
-    def transcribe(self, audio: np.ndarray, samplerate: int) -> TranscriptionResult:
+    def transcribe(
+        self, audio: np.ndarray, samplerate: int, language_hint: str = ""
+    ) -> TranscriptionResult:
         """Chuyển 1 segment audio thành text + ngôn ngữ + độ tin cậy.
 
         Args:
@@ -108,6 +112,29 @@ class AIProvider(ABC):
                 rõ — KHÔNG hardcode — vì `audio` có thể đến từ
                 stream_loopback_chunks() (luôn 16000Hz) HOẶC từ
                 record_system_audio() (mặc định 48000Hz, phụ thuộc device).
+            language_hint: 🔒 MỚI (CONTRACTS.md Mục 38) — mã ISO 639-1
+                (vd "ja") do người dùng CHỦ ĐỘNG chọn ở
+                `MeetingContextDialog` TRƯỚC khi bắt đầu ghi ("" = "Tự
+                động", giữ nguyên hành vi cũ — model tự đoán ngôn ngữ như
+                trước đây). KHI có giá trị: implementation truyền THẲNG
+                xuống tham số `language` của Whisper API (Groq/OpenAI) —
+                đây là tham số CHÍNH THỨC của Whisper để ÉP model không tự
+                đoán ngôn ngữ, giảm mạnh hallucination "nhảy ngôn ngữ" khi
+                audio có tạp âm/nhạc nền/hiệu ứng âm thanh chồng lên thoại
+                (xem bối cảnh phát hiện đầy đủ ở CONTRACTS.md Mục 38 —
+                phản hồi test thật: video anime tiếng Nhật có tạp âm chiến
+                đấu/nhạc nền khiến Whisper tự nhận nhầm nhiều đoạn sang
+                EN/Norwegian Nynorsk/Russian dù KHÔNG có ai nói các ngôn
+                ngữ đó). Đây LÀ HINT, KHÔNG PHẢI ép buộc dịch — model vẫn
+                tự transcribe đúng NỘI DUNG âm thanh, chỉ bớt tự ý đổi
+                NGÔN NGỮ khi gặp đoạn ồn/khó nghe. ⚠️ Đánh đổi: nếu audio
+                thật sự có code-switch (vd vài từ tiếng Anh xen giữa hội
+                thoại tiếng Nhật), đặt hint có thể khiến model cố phiên âm
+                những từ đó theo ngữ âm ngôn ngữ đã hint thay vì nhận đúng
+                — người dùng tự cân nhắc đánh đổi này qua UI (mặc định
+                "Tự động", không bật sẵn cho ai). Optional, mặc định ""
+                để KHÔNG phá vỡ lời gọi cũ (test cũ gọi `transcribe(audio,
+                samplerate)` 2 tham số vẫn hoạt động y hệt trước).
 
         Returns:
             TranscriptionResult. Implementation tự ghi WAV PCM16 vào buffer
@@ -157,7 +184,11 @@ class AIProvider(ABC):
 
     @abstractmethod
     def suggest_answer(
-        self, question_text: str, context_text: str, user_native_lang: str
+        self,
+        question_text: str,
+        context_text: str,
+        user_native_lang: str,
+        meeting_context: str = "",
     ) -> str:
         """🔒 ĐÃ CHỐT (Phase 2, F5-F7) — soạn gợi ý trả lời cho 1 câu hỏi.
 
@@ -178,6 +209,20 @@ class AIProvider(ABC):
                 nhiêu câu — khuyến nghị 3-5 câu gần nhất, KHÔNG đẩy toàn bộ
                 transcript phiên họp vào (tốn token, không cần thiết).
             user_native_lang: Mã ISO 639-1 ngôn ngữ mẹ đẻ người dùng, vd "vi".
+            meeting_context: 🔒 MỚI (Vòng 9, xem CONTRACTS.md Mục 18) — bối
+                cảnh TĨNH của cả phiên họp (vai trò người nói/người nghe,
+                môi trường, mục đích cuộc họp/phỏng vấn/trò chơi, ...),
+                người dùng tự nhập tay HOẶC dán từ file .txt/.md TRƯỚC khi
+                bấm "Bắt đầu ghi" (xem MeetingContextDialog). KHÁC hẳn
+                `context_text` ở trên: đây là 1 khối văn bản CỐ ĐỊNH cho
+                nguyên phiên họp (không đổi theo từng câu hỏi), trong khi
+                `context_text` là 1 cửa sổ trượt vài câu gần nhất. Optional,
+                mặc định "" (không có bối cảnh) để KHÔNG phá vỡ các lời gọi
+                cũ/test cũ đang truyền đúng 3 tham số vị trí. Phạm vi ÁP
+                DỤNG hiện tại CHỈ ở suggest_answer() — CHƯA áp dụng cho
+                translate()/summarize() dù đã thiết kế dự phòng (xem
+                CONTRACTS.md Mục 18 lý do + chi phí đánh đổi nếu mở rộng
+                sau này).
 
         Returns:
             Gợi ý trả lời bằng `user_native_lang`. Implementation PHẢI tự
@@ -192,6 +237,45 @@ class AIProvider(ABC):
         Note:
             Đồng bộ (blocking), cùng quy ước threading với transcribe()/
             translate() — gọi từ worker thread, không gọi từ Qt main thread.
+        """
+        ...
+
+    @abstractmethod
+    def chat(self, messages: list[dict], user_native_lang: str) -> str:
+        """🔒 ĐÃ CHỐT (CONTRACTS.md Mục 21) — 1 lượt hỏi-đáp tự do đa lượt
+        (multi-turn) với AI, dùng cho `ChatDialog` ("💬 Hỏi AI").
+
+        ⚠️ Trả lời HOÀN TOÀN bằng kiến thức nội tại (train-time) của model
+        — KHÔNG tra cứu web/tin tức mới (quyết định chốt: ưu tiên đơn
+        giản/chi phí thấp so với tích hợp thêm 1 API tìm kiếm riêng như
+        Tavily/Serper/Brave). Implementation KHÔNG được tự bịa ra khả năng
+        tra cứu real-time không có thật.
+
+        Args:
+            messages: Lịch sử hội thoại đầy đủ TÍNH ĐẾN LƯỢT NÀY, mỗi phần
+                tử `{"role": "user"|"assistant", "content": str}`, theo
+                đúng thứ tự thời gian, PHẦN TỬ CUỐI luôn là lượt "user"
+                mới nhất (chưa có trả lời). KHÔNG gồm message "system" —
+                implementation tự thêm system prompt riêng (cùng quy ước
+                với translate()/suggest_answer()/summarize() — UI/wiring
+                layer không tự soạn system prompt, xem ChatDialog).
+            user_native_lang: Mã ISO 639-1, PHẢI trả lời bằng ngôn ngữ
+                này dù người dùng gõ câu hỏi bằng ngôn ngữ nào (cùng quy
+                ước output-language-rule như suggest_answer(), nhưng
+                KHÔNG áp dụng lưới an toàn "sai script" của
+                suggest_answer() — chat tự do có thể hợp lệ trả lời xen
+                ngôn ngữ khác nếu người dùng chủ động yêu cầu, vd "dịch
+                câu này sang tiếng Anh giúp tôi").
+
+        Returns:
+            Câu trả lời (chỉ nội dung lượt cuối) bằng `user_native_lang`.
+
+        Raises:
+            ProviderError: network/auth/API lỗi, hoặc response không hợp lệ.
+
+        Note:
+            Đồng bộ (blocking), cùng quy ước threading với các method khác
+            — gọi từ OneShotAIWorker, không gọi trực tiếp từ Qt main thread.
         """
         ...
 

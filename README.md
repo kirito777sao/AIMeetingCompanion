@@ -74,6 +74,7 @@
 | F11 | Xuất biên bản ra `.docx` và `.pdf` (hỗ trợ tiếng Việt có dấu)                 | ✅ Hoàn thiện                                     |
 | F13 | Lịch sử các cuộc họp cũ, tìm kiếm theo nội dung transcript                    | ✅ Hoàn thiện                                     |
 | F14 | Chọn provider AI (**Groq / OpenAI / Gemini**) trong Settings, tự nhập API key | ✅ Hoàn thiện                                     |
+| F16 | Nhập trước **bối cảnh cuộc họp** (gõ tay + tải file `.txt`/`.md`) để "Nhờ AI trả lời" gợi ý sát tình huống hơn | ✅ Hoàn thiện (Vòng 9)                            |
 | F12 | Phân biệt người nói (diarization)                                             | ⏳ Chưa làm (Phase 4, cân nhắc theo nhu cầu thật) |
 | F15 | Chế độ hoàn toàn offline (STT local bằng `faster-whisper`)                    | ⏳ Chưa làm (Phase 4, cân nhắc theo nhu cầu thật) |
 
@@ -82,6 +83,7 @@
 - **Lọc hallucination khi im lặng**: dùng tín hiệu `no_speech_prob` riêng biệt từ Whisper (khác với `confidence`) để loại bỏ transcript rác sinh ra từ đoạn im lặng/nhạc nền, **không** dùng confidence chung để tránh lọc nhầm câu ngắn nhưng có thật.
 - **Không bịa thông tin**: khi tổng hợp biên bản hoặc soạn gợi ý trả lời, AI được yêu cầu rõ trả về placeholder (`[số liệu cụ thể]`) hoặc danh sách rỗng nếu không có dữ liệu thật trong transcript, thay vì tự sinh số liệu nghe có vẻ hợp lý.
 - **Đa nhà cung cấp AI thật, không chỉ cấu hình giả**: `OpenAICompatProvider` dùng chung logic dịch/gợi ý/tóm tắt cho cả 3 provider qua SDK `openai` (chỉ đổi `base_url`); riêng Gemini không có API kiểu Whisper cho STT nên `GeminiProvider.transcribe()` được viết tách riêng, gọi REST `generateContent` trực tiếp qua `httpx`.
+- **Bối cảnh cuộc họp (Vòng 9, F16)**: trước khi bấm "Bắt đầu ghi", có thể mô tả trước ai nói với ai/mục đích gì (phỏng vấn, họp công việc, trò chơi...) — nhập tay hoặc tải file `.txt`/`.md` (dùng được cả 2 cách cùng lúc), lưu lại theo phiên họp, dùng cho "Nhờ AI trả lời" trong suốt phiên. **Phạm vi hiện tại chỉ áp dụng cho `suggest_answer()`** — CHƯA áp dụng cho dịch transcript realtime hay tổng hợp biên bản cuối (xem CONTRACTS.md Mục 18 lý do đánh đổi độ trễ).
 
 ---
 
@@ -322,6 +324,7 @@ python tests/test_openai_provider_offline.py
 python tests/test_gemini_provider_offline.py
 python tests/test_provider_factory_offline.py
 python tests/test_db.py
+python tests/test_meeting_context_offline.py
 python tests/test_pipeline.py
 python tests/test_report_export.py
 python tests/test_config_store.py
@@ -347,6 +350,8 @@ pyinstaller --noconfirm --windowed --name "AIMeetingCompanion" \
 
 Kết quả nằm tại `dist/AIMeetingCompanion/AIMeetingCompanion.exe`, chạy độc lập trên máy không cài Python — người dùng cuối tự mở ⚙️ Cài đặt để nhập API key của riêng họ, không cần file `.env`.
 
+> ⚠️ Nếu có cài `qt-material` (skin UI tuỳ chọn, Vòng 9 — xem Mục "Tính năng chính"): package này có kèm data file (theme `.xml`, font) mà PyInstaller mặc định KHÔNG tự phát hiện — cần thêm `--collect-data qt_material` vào lệnh `pyinstaller` ở trên, nếu không app đóng gói sẽ fallback về style mặc định dù máy dev có cài package. CHƯA tự verify bước này trên Windows thật.
+
 ---
 
 ## 🗺️ Lộ trình phát triển
@@ -358,6 +363,7 @@ Kết quả nằm tại `dist/AIMeetingCompanion/AIMeetingCompanion.exe`, chạy
 | Phase 2            | Trợ lý trả lời — gợi ý, sửa, dịch ngược (F5-F7)                                               | ✅                                                                                                                                         |
 | Phase 3            | Biên bản cuộc họp — tổng hợp, xuất file, lịch sử (F10, F11, F13)                              | ✅                                                                                                                                         |
 | _Mở rộng_          | Multi-provider AI — Groq/OpenAI/Gemini, mỗi người tự chọn + tự nhập key (F14)                 | ✅                                                                                                                                         |
+| _Mở rộng_          | Bối cảnh cuộc họp cho "Nhờ AI trả lời" + skin UI `qt_material` tuỳ chọn (F16, Vòng 9)          | ✅ (chưa tự verify UI thật trên Windows — xem CONTRACTS.md Mục 18.3)                                                                       |
 | Phase 4 (đề xuất)  | Đóng gói `.exe` chuyên nghiệp + retest toàn bộ trên Windows thật                              | Khuyến nghị làm **trước tiên** trong Phase 4 — lộ ra bug đóng gói (DPAPI, đường dẫn, antivirus) không thể lường hết khi chỉ chạy từ source |
 | Phase 4 (cân nhắc) | `faster-whisper` chạy local — fallback khi mất mạng/hết quota cả 3 provider (F15)             | Chỉ làm nếu thực sự cần dùng nơi mạng không ổn định — kéo theo PyTorch, ảnh hưởng mục tiêu ".exe nhẹ"                                      |
 | Phase 4 (cân nhắc) | Diarization — phân biệt người nói (F12)                                                       | Chỉ làm nếu use-case thật cần biết "ai nói câu nào"                                                                                        |
@@ -370,6 +376,8 @@ Kết quả nằm tại `dist/AIMeetingCompanion/AIMeetingCompanion.exe`, chạy
 - **Độ trễ pipeline** ~1.5–4s mỗi lệnh gọi cloud (giới hạn vốn có của free-tier, không có cách miễn phí xoá hẳn) — UI luôn hiển thị trạng thái xử lý trung thực, không cam kết realtime tuyệt đối.
 - **Gemini STT** dùng REST `generateContent` (không có endpoint kiểu Whisper chính thức) — `confidence` hiện là số cố định 0.75 (placeholder), `no_speech_prob` là tín hiệu nhị phân (0.0/1.0), không mịn như Whisper thật.
 - **Diarization và chế độ offline hoàn toàn** chưa được triển khai (xem Phase 4).
+- **Bối cảnh cuộc họp (F16)** hiện chỉ ảnh hưởng "Nhờ AI trả lời" — dịch transcript song ngữ realtime và tổng hợp biên bản cuối họp CHƯA dùng tới, dù đã thiết kế dự phòng cho việc mở rộng sau này (xem CONTRACTS.md Mục 18).
+- **Skin UI `qt_material`** (Vòng 9) là tuỳ chọn, chưa tự verify hiển thị thật trên Windows kết hợp với `theme.qss` có đẹp/dễ nhìn như kỳ vọng không.
 - Nội dung nhạy cảm (số liệu công ty, thông tin khách hàng) đi qua API cloud của bên thứ ba theo đúng chính sách của từng provider — người dùng cần tự cân nhắc trước khi dùng cho cuộc họp có nội dung mật.
 
 ---

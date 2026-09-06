@@ -82,7 +82,8 @@ CREATE TABLE IF NOT EXISTS meetings (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at      TEXT NOT NULL,
     ended_at        TEXT,
-    user_native_lang TEXT NOT NULL
+    user_native_lang TEXT NOT NULL,
+    meeting_context TEXT
 );
 
 CREATE TABLE IF NOT EXISTS segments (
@@ -173,8 +174,34 @@ class MeetingStore:
             self._conn.execute("PRAGMA foreign_keys = ON;")
             self._conn.executescript(_SCHEMA)
             self._conn.commit()
+            self._migrate_add_meeting_context_column()
         except sqlite3.Error as exc:
             raise StorageError(f"Không thể mở/khởi tạo database tại {db_path}: {exc}") from exc
+
+    def _migrate_add_meeting_context_column(self) -> None:
+        """🔒 MỚI (Vòng 9, CONTRACTS.md Mục 18) — thêm cột `meeting_context`
+        vào bảng `meetings` cho DB ĐÃ TỒN TẠI từ trước Vòng 9.
+
+        `CREATE TABLE IF NOT EXISTS` trong `_SCHEMA` ở trên CHỈ tạo bảng
+        khi bảng CHƯA có — với DB cũ (bảng `meetings` đã tồn tại từ Vòng 1,
+        chưa có cột này), executescript() ở trên KHÔNG tự thêm cột mới vào
+        bảng đã có sẵn. `ALTER TABLE ... ADD COLUMN` là cách chuẩn để thêm
+        cột cho bảng đã tồn tại mà KHÔNG mất dữ liệu cũ.
+
+        Idempotent qua try/except bắt đúng lỗi "duplicate column name" của
+        SQLite — lệnh này chạy lại ở MỌI lần mở app (kể cả sau khi đã
+        migrate xong ở lần đầu, hoặc với DB MỚI đã có sẵn cột từ _SCHEMA),
+        nên luôn kỳ vọng gặp lỗi này ở các lần sau, không phải trường hợp
+        bất thường cần cảnh báo người dùng.
+        """
+        try:
+            self._conn.execute("ALTER TABLE meetings ADD COLUMN meeting_context TEXT")
+            self._conn.commit()
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc):
+                raise StorageError(
+                    f"Không thể migrate cột meeting_context vào bảng meetings: {exc}"
+                ) from exc
 
     def __enter__(self) -> "MeetingStore":
         return self
@@ -187,18 +214,49 @@ class MeetingStore:
 
     # -- meetings ------------------------------------------------------
 
-    def start_meeting(self, user_native_lang: str) -> int:
-        """Tạo 1 phiên họp mới, trả về meeting_id để dùng cho add_segment()."""
+    def start_meeting(self, user_native_lang: str, meeting_context: str = "") -> int:
+        """Tạo 1 phiên họp mới, trả về meeting_id để dùng cho add_segment().
+
+        Args:
+            user_native_lang: Mã ISO 639-1 ngôn ngữ mẹ đẻ người dùng.
+            meeting_context: 🔒 MỚI (Vòng 9, CONTRACTS.md Mục 18) — bối cảnh
+                TĨNH của phiên họp người dùng tự nhập/dán từ file trước khi
+                bấm "Bắt đầu ghi" (xem MeetingContextDialog), dùng cho
+                suggest_answer() trong suốt phiên. Optional, mặc định ""
+                để KHÔNG phá vỡ lời gọi cũ chỉ truyền `user_native_lang`
+                (tests/test_db.py, ...). Lưu NULL (không phải chuỗi rỗng)
+                khi không có gì, cùng quy ước với các cột TEXT optional
+                khác trong bảng này (vd `translated_text`).
+        """
         try:
             cur = self._conn.execute(
-                "INSERT INTO meetings (started_at, ended_at, user_native_lang) "
-                "VALUES (?, NULL, ?)",
-                (_utcnow_iso(), user_native_lang),
+                "INSERT INTO meetings (started_at, ended_at, user_native_lang, meeting_context) "
+                "VALUES (?, NULL, ?, ?)",
+                (_utcnow_iso(), user_native_lang, meeting_context or None),
             )
             self._conn.commit()
             return int(cur.lastrowid)
         except sqlite3.Error as exc:
             raise StorageError(f"Không thể tạo phiên họp mới: {exc}") from exc
+
+    def get_meeting_context(self, meeting_id: int) -> str:
+        """Đọc lại `meeting_context` đã lưu cho 1 phiên họp (🔒 MỚI Vòng 9).
+
+        Trả về chuỗi rỗng "" nếu không có bối cảnh (NULL trong DB) HOẶC
+        meeting_id không tồn tại — KHÔNG raise, vì đây chỉ là dữ liệu bổ
+        sung/tuỳ chọn, gọi sai meeting_id không nên làm crash luồng gọi.
+        Dự phòng cho việc mở lại/hiển thị bối cảnh phiên cũ (vd Lịch sử) —
+        CHƯA có UI nào gọi tới ở Vòng 9 này (xem CONTRACTS.md Mục 18).
+        """
+        try:
+            row = self._conn.execute(
+                "SELECT meeting_context FROM meetings WHERE id = ?", (meeting_id,)
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise StorageError(f"Không thể đọc meeting_context id={meeting_id}: {exc}") from exc
+        if row is None or row[0] is None:
+            return ""
+        return str(row[0])
 
     def end_meeting(self, meeting_id: int) -> None:
         """Đánh dấu phiên họp đã kết thúc (set ended_at). Gọi khi người dùng
@@ -385,6 +443,99 @@ class MeetingStore:
                 )
             )
         return results
+
+    def delete_meetings(self, meeting_ids: list[int]) -> int:
+        """🔒 MỚI (F13 mở rộng — "Xoá lịch sử phiên họp", chốt theo yêu cầu
+        người dùng Vòng 10) — xoá VĨNH VIỄN 1 hoặc nhiều phiên họp khỏi
+        `meetings.db`. KHÔNG có xoá mềm/thùng rác/cờ `deleted` nào — đúng
+        yêu cầu đã chốt: "xóa là xóa hẳn không có xóa mềm hay khôi phục gì
+        cả". UI (`ui/history_dialog.py`) chịu trách nhiệm cảnh báo + xác
+        nhận với người dùng TRƯỚC khi gọi method này — method này KHÔNG tự
+        hỏi lại, cứ nhận `meeting_ids` là xoá ngay (tách rõ tầng: DB chỉ lo
+        đúng việc xoá dữ liệu, UI lo đúng việc hỏi ý người dùng).
+
+        Xoá cả dữ liệu liên quan (`segments`, `ai_assists`, `meeting_reports`)
+        theo đúng thứ tự CON trước CHA — bắt buộc vì `PRAGMA foreign_keys =
+        ON` (xem `__init__`): xoá `meetings` trước khi xoá con sẽ bị SQLite
+        chặn bằng lỗi FOREIGN KEY constraint.
+
+        Chạy trong 1 transaction DUY NHẤT (tự `rollback()` nếu có lỗi giữa
+        chừng, `commit()` chỉ khi mọi lệnh xoá đều thành công) — tránh trạng
+        thái nửa vời (vd đã xoá xong segments của 3/5 phiên rồi lỗi ở phiên
+        thứ 4, để lại `meetings` mồ côi không còn segment nào nhưng dòng
+        `meetings` gốc vẫn còn).
+
+        Args:
+            meeting_ids: danh sách id phiên họp cần xoá. Rỗng -> không làm
+                gì, trả về 0 ngay (phòng vệ — nơi gọi ở UI không cần tự
+                kiểm tra rỗng trước khi gọi, và KHÔNG mở transaction/lock DB
+                vô ích cho thao tác không xoá gì).
+
+        Returns:
+            Số phiên họp THỰC SỰ đã tồn tại và bị xoá (id không tồn tại sẵn
+            trong DB thì không tính vào số này, cũng KHÔNG raise lỗi riêng
+            cho id lạ — coi "xoá 1 thứ vốn không tồn tại" là vô hại, giống
+            hành vi `DELETE ... WHERE` chuẩn của SQL).
+        """
+        if not meeting_ids:
+            return 0
+
+        placeholders = ",".join("?" * len(meeting_ids))
+        params = list(meeting_ids)
+        try:
+            cursor = self._conn.execute(
+                f"SELECT COUNT(*) FROM meetings WHERE id IN ({placeholders})", params,
+            )
+            existing_count = cursor.fetchone()[0]
+
+            self._conn.execute(
+                f"DELETE FROM meeting_reports WHERE meeting_id IN ({placeholders})", params,
+            )
+            self._conn.execute(
+                f"DELETE FROM ai_assists WHERE meeting_id IN ({placeholders})", params,
+            )
+            self._conn.execute(
+                f"DELETE FROM segments WHERE meeting_id IN ({placeholders})", params,
+            )
+            self._conn.execute(
+                f"DELETE FROM meetings WHERE id IN ({placeholders})", params,
+            )
+
+            # 🔒 MỚI (Mục 33 — yêu cầu người dùng) — xoá 1 phần/nhiều phần
+            # (kể cả gần hết) KHÔNG được đổi số thứ tự (= `meetings.id`) của
+            # các phiên CÒN LẠI — điều này đã ĐÚNG SẴN vì id là AUTOINCREMENT
+            # cố định, không tự dồn lại. Yêu cầu THÊM: chỉ khi bảng `meetings`
+            # xoá xong TRỐNG HOÀN TOÀN (0 dòng, dù xoá qua "Chọn tất cả" hay
+            # tình cờ xoá hết từng đợt) thì reset bộ đếm AUTOINCREMENT về 0,
+            # để phiên họp MỚI tiếp theo bắt đầu lại từ id=1 — tránh bộ đếm
+            # tăng vô hạn qua thời gian dài dùng khi người dùng đã dọn sạch
+            # lịch sử. Cùng 1 transaction với lệnh xoá phía trên (atomic —
+            # không có chuyện xoá xong nhưng reset bộ đếm bị lỡ giữa chừng).
+            remaining = self._conn.execute(
+                "SELECT COUNT(*) FROM meetings"
+            ).fetchone()[0]
+            if remaining == 0:
+                # `sqlite_sequence` chỉ được SQLite tự tạo lần đầu có 1 dòng
+                # AUTOINCREMENT được insert — DB chưa từng ghi gì thì bảng
+                # này chưa tồn tại, phải kiểm tra trước khi DELETE để không
+                # bị lỗi "no such table".
+                has_sequence_table = self._conn.execute(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type='table' AND name='sqlite_sequence'"
+                ).fetchone()
+                if has_sequence_table:
+                    self._conn.execute(
+                        "DELETE FROM sqlite_sequence WHERE name = 'meetings'"
+                    )
+
+            self._conn.commit()
+        except sqlite3.Error as exc:
+            self._conn.rollback()
+            raise StorageError(
+                f"Không thể xoá {len(meeting_ids)} phiên họp đã chọn: {exc}"
+            ) from exc
+
+        return existing_count
 
     # -- ai_assists (Phase 2 Bước 3/3) ------------------------------------
 

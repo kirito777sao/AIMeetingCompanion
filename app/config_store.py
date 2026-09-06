@@ -90,8 +90,17 @@ _KEY_FIELD = "groq_api_key"            # tên field LEGACY (định dạng cũ, 
 _ENCODING_FIELD = "encoding"  # "dpapi" | "plaintext"
 _PROVIDERS_FIELD = "providers"          # 🔒 MỚI -- định dạng multi-provider
 _ACTIVE_PROVIDER_FIELD = "active_provider"
+_MODEL_OVERRIDES_FIELD = "model_overrides"  # 🔒 MỚI (Backlog #4, CONTRACTS.md Mục 31)
 _DEFAULT_PROVIDER = "groq"
 _KNOWN_PROVIDERS = ("groq", "openai", "gemini")
+# 🔒 MỚI (Backlog #4) -- danh sách field model HỢP LỆ có thể override qua
+# Settings UI -- khớp CHÍNH XÁC tên tham số constructor của
+# GroqProvider/OpenAIProvider/GeminiProvider (xem app/ai/*_provider.py) --
+# đặt tên SAI ở đây sẽ bị provider_factory.create_provider() truyền
+# xuống constructor gây TypeError ngay khi khởi tạo, không âm thầm bỏ qua.
+_MODEL_OVERRIDE_FIELDS = (
+    "stt_model", "stt_fallback_model", "translate_model", "translate_fallback_model",
+)
 
 
 class ConfigStoreError(RuntimeError):
@@ -309,10 +318,18 @@ def save_api_key(
 
     providers[provider] = entry
 
-    payload = {
+    # 🔒 MỚI (Backlog #4, CONTRACTS.md Mục 31) -- PHẢI giữ lại
+    # "model_overrides" đã lưu trước đó (nếu có) -- payload dưới đây thay
+    # THẾ HOÀN TOÀN nội dung file, quên field này sẽ XOÁ MẤT mọi model
+    # override người dùng đã lưu qua Settings UI chỉ vì họ lưu/đổi API
+    # key của 1 provider bất kỳ sau đó (2 thao tác không liên quan gì
+    # nhau, không nên ảnh hưởng nhau).
+    payload: dict = {
         _ACTIVE_PROVIDER_FIELD: provider,
         _PROVIDERS_FIELD: providers,
     }
+    if _MODEL_OVERRIDES_FIELD in existing and isinstance(existing[_MODEL_OVERRIDES_FIELD], dict):
+        payload[_MODEL_OVERRIDES_FIELD] = existing[_MODEL_OVERRIDES_FIELD]
 
     config_path = get_config_path(base_dir)
     try:
@@ -405,7 +422,10 @@ def clear_api_key(provider: str = _DEFAULT_PROVIDER, base_dir: Optional[Path] = 
     if active == provider or active not in providers:
         active = "groq" if "groq" in providers else next(iter(providers))
 
-    new_payload = {_ACTIVE_PROVIDER_FIELD: active, _PROVIDERS_FIELD: providers}
+    # 🔒 MỚI (Backlog #4) -- giữ lại model_overrides, cùng lý do save_api_key() ở trên.
+    new_payload: dict = {_ACTIVE_PROVIDER_FIELD: active, _PROVIDERS_FIELD: providers}
+    if _MODEL_OVERRIDES_FIELD in payload and isinstance(payload[_MODEL_OVERRIDES_FIELD], dict):
+        new_payload[_MODEL_OVERRIDES_FIELD] = payload[_MODEL_OVERRIDES_FIELD]
     try:
         config_path.write_text(json.dumps(new_payload), encoding="utf-8")
     except OSError as exc:
@@ -439,7 +459,10 @@ def set_active_provider(provider: str, base_dir: Optional[Path] = None) -> None:
     else:
         providers = {}
 
-    new_payload = {_ACTIVE_PROVIDER_FIELD: provider, _PROVIDERS_FIELD: providers}
+    new_payload: dict = {_ACTIVE_PROVIDER_FIELD: provider, _PROVIDERS_FIELD: providers}
+    if _MODEL_OVERRIDES_FIELD in payload and isinstance(payload[_MODEL_OVERRIDES_FIELD], dict):
+        # 🔒 MỚI (Backlog #4) -- giữ lại model_overrides, cùng lý do save_api_key() ở trên.
+        new_payload[_MODEL_OVERRIDES_FIELD] = payload[_MODEL_OVERRIDES_FIELD]
     config_dir = get_config_dir(base_dir)
     try:
         config_dir.mkdir(parents=True, exist_ok=True)
@@ -458,3 +481,113 @@ def list_configured_providers(base_dir: Optional[Path] = None) -> list[str]:
     if _KEY_FIELD in payload and payload.get(_KEY_FIELD):
         return ["groq"]
     return []
+
+
+# ---------------------------------------------------------------------------
+# 🔒 MỚI (Backlog #4, CONTRACTS.md Mục 31) — Model Settings UI: cho phép
+# người dùng CUỐI tự đổi tên model (stt_model/stt_fallback_model/
+# translate_model/translate_fallback_model) qua Settings UI, KHÔNG cần
+# `.env` (bản `.exe` đóng gói không kèm `.env`) — nếu provider decommission
+# model lần nữa (đã xảy ra thật với Groq, xem Mục 19), người dùng cuối tự
+# đổi được NGAY, không phải chờ bản cập nhật app.
+#
+# Lưu ĐỘC LẬP theo từng provider (giống API key) — đổi model override của
+# Gemini không ảnh hưởng override đã lưu của Groq/OpenAI. Field RỖNG/không
+# có nghĩa là "dùng default của provider đó" (không phải "override thành
+# chuỗi rỗng") — `create_provider()` (provider_factory.py) CHỈ truyền
+# xuống constructor những field THẬT SỰ có override khác rỗng.
+# ---------------------------------------------------------------------------
+
+
+def save_model_overrides(
+    provider: str, overrides: dict[str, str], base_dir: Optional[Path] = None,
+) -> None:
+    """Lưu `overrides` (chỉ các field trong `_MODEL_OVERRIDE_FIELDS`) cho
+    `provider`. Field có giá trị RỖNG (`""`/khoảng trắng) sau khi `.strip()`
+    bị LOẠI BỎ khỏi override đã lưu (coi như "xoá override field này, quay
+    về default") — KHÔNG lưu chuỗi rỗng như 1 override thật, tránh
+    `create_provider()` truyền `stt_model=""` xuống constructor (sai khác
+    hẳn "không truyền gì", có thể làm provider hiểu nhầm là 1 tên model
+    thật rỗng).
+
+    KHÔNG đụng override đã lưu của các provider KHÁC (đọc payload hiện có,
+    chỉ ghi đè đúng key `provider`) — cùng nguyên tắc `save_api_key()`.
+
+    Field KHÔNG có trong `_MODEL_OVERRIDE_FIELDS` bị BỎ QUA lặng lẽ (không
+    raise) — phòng người gọi lỡ truyền nhầm tên field, tránh lưu rác vào
+    config.json mà provider không bao giờ đọc tới.
+
+    Raises:
+        ConfigStoreError: không ghi được file (quyền/đĩa).
+    """
+    provider = _normalize_provider(provider)
+    cleaned = {
+        field: value.strip()
+        for field, value in overrides.items()
+        if field in _MODEL_OVERRIDE_FIELDS and value and value.strip()
+    }
+
+    config_dir = get_config_dir(base_dir)
+    try:
+        config_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ConfigStoreError(f"Không tạo được thư mục config tại {config_dir}: {exc}") from exc
+
+    existing = _read_raw_payload(base_dir)
+    all_overrides: dict = {}
+    if _MODEL_OVERRIDES_FIELD in existing and isinstance(existing[_MODEL_OVERRIDES_FIELD], dict):
+        all_overrides = dict(existing[_MODEL_OVERRIDES_FIELD])
+
+    if cleaned:
+        all_overrides[provider] = cleaned
+    else:
+        # Không còn field nào -> xoá hẳn entry provider này (rỗng không
+        # có ý nghĩa gì để giữ lại, tránh config.json phình rác `{}`).
+        all_overrides.pop(provider, None)
+
+    # Giữ nguyên mọi field KHÁC đã có (active_provider, providers) --
+    # CHỈ thay phần model_overrides, không phải viết lại toàn bộ payload
+    # như save_api_key() (hàm đó có lý do riêng để tái cấu trúc "providers",
+    # ở đây không cần).
+    payload = dict(existing)
+    if all_overrides:
+        payload[_MODEL_OVERRIDES_FIELD] = all_overrides
+    else:
+        payload.pop(_MODEL_OVERRIDES_FIELD, None)
+
+    config_path = get_config_path(base_dir)
+    try:
+        config_path.write_text(json.dumps(payload), encoding="utf-8")
+        try:
+            os.chmod(config_path, 0o600)
+        except OSError:
+            pass
+    except OSError as exc:
+        raise ConfigStoreError(f"Không lưu được model override tại {config_path}: {exc}") from exc
+
+
+def load_model_overrides(provider: str, base_dir: Optional[Path] = None) -> dict[str, str]:
+    """Đọc lại model override đã lưu của `provider`. Trả dict RỖNG (KHÔNG
+    raise) nếu chưa từng lưu gì, file hỏng, hoặc provider này chưa có
+    override nào — `create_provider()` coi dict rỗng là "không override
+    field nào, dùng default của provider"."""
+    provider = _normalize_provider(provider)
+    payload = _read_raw_payload(base_dir)
+    overrides_all = payload.get(_MODEL_OVERRIDES_FIELD)
+    if not isinstance(overrides_all, dict):
+        return {}
+    entry = overrides_all.get(provider)
+    if not isinstance(entry, dict):
+        return {}
+    return {
+        field: value for field, value in entry.items()
+        if field in _MODEL_OVERRIDE_FIELDS and isinstance(value, str) and value
+    }
+
+
+def clear_model_overrides(provider: str, base_dir: Optional[Path] = None) -> None:
+    """Xoá TOÀN BỘ model override đã lưu của `provider` (nút 'Khôi phục
+    mặc định' trên Settings) — quay lại dùng default hardcode của
+    provider đó. KHÔNG đụng override của provider khác. Không lỗi nếu
+    provider này chưa từng có override nào."""
+    save_model_overrides(provider, {}, base_dir=base_dir)

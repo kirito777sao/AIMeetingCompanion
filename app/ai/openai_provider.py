@@ -47,7 +47,13 @@ from openai import OpenAI
 
 from app import config_store
 from app.ai.base_provider import ProviderError, TranscriptionResult
-from app.ai.openai_compat_base import OpenAICompatProvider, _auth_error_hint, _call_with_rate_limit_fallback
+from app.ai.openai_compat_base import (
+    OpenAICompatProvider,
+    _auth_error_hint,
+    _call_with_fallback,
+    _resolve_client_timeout_seconds,
+    _TRANSIENT_NETWORK_MAX_RETRIES,
+)
 from app.ai.whisper_utils import (
     _encode_wav_bytes,
     _estimate_confidence,
@@ -83,10 +89,11 @@ class OpenAIProvider(OpenAICompatProvider):
         stt_model: str = "whisper-1",
         # whisper-1 không có model "rẻ hơn" để fallback khi 429 (khác Groq
         # có turbo) -- để trống nghĩa là TẮT fallback (lỗi 429 raise thẳng,
-        # đúng tinh thần "không fallback giả" của _call_with_rate_limit_fallback).
+        # đúng tinh thần "không fallback giả" của _call_with_fallback).
         stt_fallback_model: str = "",
         translate_model: str = "gpt-5-mini",
         translate_fallback_model: str = "gpt-5-nano",
+        client_timeout_seconds: float | None = None,
     ) -> None:
         """Khởi tạo provider, kết nối tới OpenAI qua SDK `openai` chính chủ.
 
@@ -103,6 +110,12 @@ class OpenAIProvider(OpenAICompatProvider):
                 mặc định "gpt-5-mini".
             translate_fallback_model: model chat dự phòng khi 429, mặc
                 định "gpt-5-nano".
+            client_timeout_seconds: 🔒 MỚI (Backlog #1, CONTRACTS.md Mục
+                28) — timeout (giây) cho `self._client` (transcribe() +
+                chat), 3 tầng ưu tiên: tham số > biến môi trường
+                `OPENAI_CLIENT_TIMEOUT_SECONDS` > default 30.0s. Xem lý do
+                đầy đủ ở `_resolve_client_timeout_seconds()`
+                (`openai_compat_base.py`).
 
         Raises:
             ProviderError: thiếu api_key ở mọi nguồn, hoặc key vẫn là giá
@@ -128,7 +141,12 @@ class OpenAIProvider(OpenAICompatProvider):
                 "OPENAI_API_KEY trong .env vẫn là giá trị MẪU, chưa được thay "
                 f"bằng key THẬT. Lấy key thật tại {_OPENAI_KEYS_URL}."
             )
-        self._client = OpenAI(api_key=resolved_key, base_url=OPENAI_BASE_URL)
+        self._client_timeout_seconds = _resolve_client_timeout_seconds(
+            client_timeout_seconds, "OPENAI_CLIENT_TIMEOUT_SECONDS",
+        )
+        self._client = OpenAI(
+            api_key=resolved_key, base_url=OPENAI_BASE_URL, timeout=self._client_timeout_seconds,
+        )
         self._stt_model = stt_model
         self._stt_fallback_model = stt_fallback_model
         self._translate_model = translate_model
@@ -137,27 +155,38 @@ class OpenAIProvider(OpenAICompatProvider):
     def _auth_error_hint(self, api_label: str, exc: Exception) -> str:
         return _auth_error_hint("OpenAI", api_label, "OPENAI_API_KEY", _OPENAI_KEYS_URL, exc)
 
-    def transcribe(self, audio, samplerate: int) -> TranscriptionResult:
+    def transcribe(self, audio, samplerate: int, language_hint: str = "") -> TranscriptionResult:
         """Xem docstring đầy đủ ở AIProvider.transcribe().
 
         Cùng pattern hệt `GroqProvider.transcribe()` (CHỦ Ý — cùng SDK,
         cùng model gốc Whisper) — chỉ khác model name + dùng hàm
-        `whisper_utils` thay vì định nghĩa lại."""
+        `whisper_utils` thay vì định nghĩa lại. `language_hint` (Mục 38)
+        cùng cơ chế/lý do với Groq — xem docstring ở đó."""
         wav_bytes = _encode_wav_bytes(audio, samplerate)
 
         def _call(model: str):
+            kwargs = {"language": language_hint} if language_hint else {}
             return self._client.audio.transcriptions.create(
                 model=model,
                 file=("segment.wav", wav_bytes, "audio/wav"),
                 response_format="verbose_json",
+                **kwargs,
             )
 
         try:
-            response, _used_model = _call_with_rate_limit_fallback(
+            response, _used_model = _call_with_fallback(
                 _call, self._stt_model, self._stt_fallback_model, "STT",
             )
         except openai.AuthenticationError as exc:
             raise ProviderError(self._auth_error_hint("STT", exc)) from exc
+        except openai.APIConnectionError as exc:
+            # 🔒 MỚI (Backlog #2, CONTRACTS.md Mục 29) -- cùng lý do Groq,
+            # xem _chat_complete() (openai_compat_base.py).
+            raise ProviderError(
+                f"OpenAI STT lỗi kết nối mạng (đã tự động thử lại "
+                f"{_TRANSIENT_NETWORK_MAX_RETRIES} lần, không thành công) — "
+                f"kiểm tra lại kết nối Internet rồi thử lại: {exc}"
+            ) from exc
         except openai.OpenAIError as exc:
             raise ProviderError(f"OpenAI STT API lỗi: {exc}") from exc
         except Exception as exc:  # phòng lỗi ngoài phạm vi SDK (parse, v.v.)

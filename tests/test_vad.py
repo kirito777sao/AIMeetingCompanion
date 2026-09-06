@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np  # noqa: E402
 
-from app.audio.vad import VadSegmenter  # noqa: E402
+from app.audio.vad import VadSegmenter, create_vad_segmenter_from_env  # noqa: E402
 
 
 class FakeVad:
@@ -208,6 +208,74 @@ def test_ngan_400ms_giua_2_luot_noi_tach_duoc_voi_nguong_moi_nhung_khong_voi_ngu
     print("OK: test_ngan_400ms_giua_2_luot_noi_tach_duoc_voi_nguong_moi_nhung_khong_voi_nguong_cu")
 
 
+_VAD_ENV_VARS = (
+    "VAD_AGGRESSIVENESS", "VAD_SILENCE_MS", "VAD_MIN_SPEECH_MS",
+    "VAD_MAX_SEGMENT_MS", "VAD_PADDING_MS",
+)
+
+
+def _clear_vad_env():
+    for name in _VAD_ENV_VARS:
+        os.environ.pop(name, None)
+
+
+def test_create_vad_segmenter_from_env_khong_co_env_dung_default_cu():
+    # 🔒 MỚI (Mục 27) -- không có biến môi trường nào đặt -> PHẢI giữ
+    # ĐÚNG default hiện tại của VadSegmenter.__init__ (KHÔNG đổi hành vi
+    # app hiện tại chỉ vì thêm tính năng đọc env).
+    _clear_vad_env()
+    try:
+        seg = create_vad_segmenter_from_env(samplerate=16000)
+        assert seg._sr == 16000
+        assert seg._vad.__class__.__name__ == "Vad"  # webrtcvad.Vad thật, không phải fake
+        # So khớp gián tiếp qua hành vi: default aggressiveness=2 hợp lệ
+        # (không raise), silence_ms=350 -> _silence_frames_limit đúng cũ.
+        assert seg._silence_frames_limit == VadSegmenter(samplerate=16000)._silence_frames_limit
+        assert seg._min_speech_frames == VadSegmenter(samplerate=16000)._min_speech_frames
+        assert seg._max_segment_frames == VadSegmenter(samplerate=16000)._max_segment_frames
+        assert seg._padding_frames == VadSegmenter(samplerate=16000)._padding_frames
+    finally:
+        _clear_vad_env()
+    print("OK: test_create_vad_segmenter_from_env_khong_co_env_dung_default_cu")
+
+
+def test_create_vad_segmenter_from_env_doc_dung_gia_tri_da_dat():
+    _clear_vad_env()
+    try:
+        os.environ["VAD_AGGRESSIVENESS"] = "3"
+        os.environ["VAD_SILENCE_MS"] = "500"
+        os.environ["VAD_MIN_SPEECH_MS"] = "300"
+        os.environ["VAD_MAX_SEGMENT_MS"] = "6000"
+        os.environ["VAD_PADDING_MS"] = "150"
+        seg = create_vad_segmenter_from_env(samplerate=16000)
+        expected = VadSegmenter(
+            samplerate=16000, aggressiveness=3, silence_ms=500,
+            min_speech_ms=300, max_segment_ms=6000, padding_ms=150,
+        )
+        assert seg._silence_frames_limit == expected._silence_frames_limit
+        assert seg._min_speech_frames == expected._min_speech_frames
+        assert seg._max_segment_frames == expected._max_segment_frames
+        assert seg._padding_frames == expected._padding_frames
+    finally:
+        _clear_vad_env()
+    print("OK: test_create_vad_segmenter_from_env_doc_dung_gia_tri_da_dat")
+
+
+def test_create_vad_segmenter_from_env_gia_tri_sai_dinh_dang_fallback_default():
+    # Gõ nhầm .env (vd "abc" thay vì số) KHÔNG được làm app crash -- phải
+    # fallback về default, không raise.
+    _clear_vad_env()
+    try:
+        os.environ["VAD_AGGRESSIVENESS"] = "not-a-number"
+        os.environ["VAD_SILENCE_MS"] = ""
+        seg = create_vad_segmenter_from_env(samplerate=16000)
+        default = VadSegmenter(samplerate=16000)
+        assert seg._silence_frames_limit == default._silence_frames_limit
+    finally:
+        _clear_vad_env()
+    print("OK: test_create_vad_segmenter_from_env_gia_tri_sai_dinh_dang_fallback_default")
+
+
 if __name__ == "__main__":
     test_silence_only_khong_tra_segment()
     test_speech_qua_ngan_bi_bo_vi_duoi_min_speech_ms()
@@ -218,4 +286,7 @@ if __name__ == "__main__":
     test_default_silence_ms_la_350()
     test_default_max_segment_ms_la_8000()
     test_ngan_400ms_giua_2_luot_noi_tach_duoc_voi_nguong_moi_nhung_khong_voi_nguong_cu()
+    test_create_vad_segmenter_from_env_khong_co_env_dung_default_cu()
+    test_create_vad_segmenter_from_env_doc_dung_gia_tri_da_dat()
+    test_create_vad_segmenter_from_env_gia_tri_sai_dinh_dang_fallback_default()
     print("\n=== TẤT CẢ TEST VAD PASS ===")

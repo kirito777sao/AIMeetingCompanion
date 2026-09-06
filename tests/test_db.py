@@ -317,6 +317,212 @@ def test_search_meetings_snippet_bi_cat_ngan_dung_do_dai():
     print("OK: test_search_meetings_snippet_bi_cat_ngan_dung_do_dai")
 
 
+def test_start_meeting_luu_va_doc_lai_duoc_meeting_context():
+    """🔒 MỚI (Vòng 9, CONTRACTS.md Mục 18)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        with MeetingStore(os.path.join(tmp, "test.db")) as store:
+            mid = store.start_meeting(
+                user_native_lang="vi",
+                meeting_context="Phỏng vấn xin việc vị trí Backend Developer.",
+            )
+            assert store.get_meeting_context(mid) == "Phỏng vấn xin việc vị trí Backend Developer."
+    print("OK: test_start_meeting_luu_va_doc_lai_duoc_meeting_context")
+
+
+def test_start_meeting_khong_truyen_meeting_context_van_hoat_dong_nhu_cu():
+    """Backward-compat: lời gọi CŨ chỉ truyền user_native_lang (như mọi
+    test khác trong file này) phải vẫn chạy được, và get_meeting_context()
+    trả về "" (không phải None/lỗi) khi không có gì."""
+    with tempfile.TemporaryDirectory() as tmp:
+        with MeetingStore(os.path.join(tmp, "test.db")) as store:
+            mid = store.start_meeting(user_native_lang="vi")
+            assert store.get_meeting_context(mid) == ""
+    print("OK: test_start_meeting_khong_truyen_meeting_context_van_hoat_dong_nhu_cu")
+
+
+def test_get_meeting_context_meeting_id_khong_ton_tai_tra_rong():
+    with tempfile.TemporaryDirectory() as tmp:
+        with MeetingStore(os.path.join(tmp, "test.db")) as store:
+            assert store.get_meeting_context(9999) == ""
+    print("OK: test_get_meeting_context_meeting_id_khong_ton_tai_tra_rong")
+
+
+def test_migrate_them_cot_meeting_context_cho_db_cu_khong_mat_du_lieu():
+    """🔒 MỚI (Vòng 9) — mô phỏng DB được tạo TỪ TRƯỚC Vòng 9 (bảng
+    `meetings` chưa có cột `meeting_context`), xác nhận mở lại bằng
+    MeetingStore hiện tại tự ALTER TABLE thêm cột mà KHÔNG mất dữ liệu cũ,
+    và vẫn dùng được start_meeting()/get_meeting_context() bình thường sau
+    đó."""
+    import sqlite3
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "legacy.db")
+        legacy_conn = sqlite3.connect(db_path)
+        legacy_conn.execute(
+            """CREATE TABLE meetings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at TEXT NOT NULL,
+                ended_at TEXT,
+                user_native_lang TEXT NOT NULL
+            )"""
+        )
+        legacy_conn.execute(
+            "INSERT INTO meetings (started_at, ended_at, user_native_lang) VALUES (?, NULL, ?)",
+            ("2024-01-01T00:00:00Z", "vi"),
+        )
+        legacy_conn.commit()
+        legacy_conn.close()
+
+        with MeetingStore(db_path) as store:
+            old_meetings = store.list_meetings()
+            assert len(old_meetings) == 1, "dữ liệu phiên họp CŨ không được mất sau migrate"
+            assert store.get_meeting_context(old_meetings[0][0]) == ""
+
+            new_mid = store.start_meeting(user_native_lang="vi", meeting_context="Bối cảnh mới sau migrate.")
+            assert store.get_meeting_context(new_mid) == "Bối cảnh mới sau migrate."
+    print("OK: test_migrate_them_cot_meeting_context_cho_db_cu_khong_mat_du_lieu")
+
+
+def test_delete_meetings_xoa_dung_meeting_va_du_lieu_lien_quan():
+    # Vòng 10 (CONTRACTS.md Mục 24) -- xoá 1 meeting phải kéo theo xoá
+    # segments/ai_assists/meeting_reports của CHÍNH meeting đó, KHÔNG đụng
+    # tới meeting khác.
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.db")
+        with MeetingStore(db_path) as store:
+            mid_to_delete = store.start_meeting(user_native_lang="vi")
+            store.add_segment(mid_to_delete, "Hello", "en", 0.9, "Xin chào", "vi", is_question=False)
+            store.add_ai_assist(
+                mid_to_delete, kind="ask_question", source_text="Q?",
+                ai_output=None, final_text="A.", target_lang="en",
+            )
+            store.save_report(mid_to_delete, overview="Tổng quan", decisions=[], action_items=["Việc 1"])
+
+            mid_to_keep = store.start_meeting(user_native_lang="en")
+            store.add_segment(mid_to_keep, "Keep me", "en", 0.9, "Giữ lại", "vi", is_question=False)
+
+            deleted_count = store.delete_meetings([mid_to_delete])
+            assert deleted_count == 1
+
+            remaining = store.list_meetings()
+            assert len(remaining) == 1
+            assert remaining[0][0] == mid_to_keep
+
+            assert store.get_segments(mid_to_keep)[0].original_text == "Keep me"
+            assert store.get_report(mid_to_delete) is None
+    print("OK: test_delete_meetings_xoa_dung_meeting_va_du_lieu_lien_quan")
+
+
+def test_delete_meetings_nhieu_id_cung_luc():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.db")
+        with MeetingStore(db_path) as store:
+            m1 = store.start_meeting(user_native_lang="vi")
+            m2 = store.start_meeting(user_native_lang="vi")
+            m3 = store.start_meeting(user_native_lang="vi")
+
+            deleted_count = store.delete_meetings([m1, m3])
+            assert deleted_count == 2
+
+            remaining_ids = [row[0] for row in store.list_meetings()]
+            assert remaining_ids == [m2]
+    print("OK: test_delete_meetings_nhieu_id_cung_luc")
+
+
+def test_delete_meetings_id_khong_ton_tai_khong_raise_loi():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.db")
+        with MeetingStore(db_path) as store:
+            mid = store.start_meeting(user_native_lang="vi")
+            deleted_count = store.delete_meetings([mid, 9999])
+            assert deleted_count == 1, "chỉ đếm id THỰC SỰ tồn tại, id lạ không tính, không raise lỗi"
+            assert store.list_meetings() == []
+    print("OK: test_delete_meetings_id_khong_ton_tai_khong_raise_loi")
+
+
+def test_delete_meetings_danh_sach_rong_tra_ve_0_khong_lam_gi():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.db")
+        with MeetingStore(db_path) as store:
+            mid = store.start_meeting(user_native_lang="vi")
+            deleted_count = store.delete_meetings([])
+            assert deleted_count == 0
+            assert len(store.list_meetings()) == 1, "danh sách rỗng không được xoá nhầm gì cả"
+    print("OK: test_delete_meetings_danh_sach_rong_tra_ve_0_khong_lam_gi")
+
+
+def test_delete_meetings_1_phan_khong_doi_id_cac_phien_con_lai():
+    # 🔒 MỚI (Mục 33) -- xoá 1 PHẦN (không phải hết) không được đổi số thứ
+    # tự (= id) của các phiên còn lại, và phiên MỚI tạo sau đó vẫn phải
+    # tiếp tục tăng bình thường (KHÔNG reset bộ đếm khi bảng chưa trống).
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.db")
+        with MeetingStore(db_path) as store:
+            m1 = store.start_meeting(user_native_lang="vi")
+            m2 = store.start_meeting(user_native_lang="vi")
+            m3 = store.start_meeting(user_native_lang="vi")
+
+            store.delete_meetings([m1])
+
+            remaining_ids = [row[0] for row in store.list_meetings()]
+            assert remaining_ids == [m3, m2], "id các phiên còn lại phải giữ nguyên, không dồn lại"
+
+            m4 = store.start_meeting(user_native_lang="vi")
+            assert m4 == m3 + 1, "bộ đếm phải tiếp tục tăng bình thường, KHÔNG reset khi bảng chưa trống"
+    print("OK: test_delete_meetings_1_phan_khong_doi_id_cac_phien_con_lai")
+
+
+def test_delete_meetings_xoa_het_reset_bo_dem_ve_1():
+    # 🔒 MỚI (Mục 33 -- yêu cầu người dùng) -- xoá HẾT (bảng meetings trống
+    # hoàn toàn sau khi xoá) phải reset bộ đếm AUTOINCREMENT, để phiên họp
+    # MỚI tiếp theo bắt đầu lại từ id=1 thay vì tiếp tục tăng vô hạn.
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.db")
+        with MeetingStore(db_path) as store:
+            m1 = store.start_meeting(user_native_lang="vi")
+            m2 = store.start_meeting(user_native_lang="vi")
+            assert m2 == m1 + 1
+
+            deleted_count = store.delete_meetings([m1, m2])
+            assert deleted_count == 2
+            assert store.list_meetings() == []
+
+            m3 = store.start_meeting(user_native_lang="vi")
+            assert m3 == 1, "xoá hết sạch lịch sử thì phiên tiếp theo phải bắt đầu lại từ id=1"
+    print("OK: test_delete_meetings_xoa_het_reset_bo_dem_ve_1")
+
+
+def test_delete_meetings_xoa_het_qua_nhieu_lan_rieng_le_van_reset():
+    # Xoá hết KHÔNG NHẤT THIẾT qua 1 lệnh gọi duy nhất -- 2 lệnh xoá riêng
+    # biệt mà kết quả cuối cùng làm bảng trống cũng phải reset bộ đếm ở
+    # đúng lệnh xoá làm bảng trống (không cần biết trước đó có bao nhiêu
+    # lượt xoá riêng lẻ).
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.db")
+        with MeetingStore(db_path) as store:
+            m1 = store.start_meeting(user_native_lang="vi")
+            m2 = store.start_meeting(user_native_lang="vi")
+
+            store.delete_meetings([m1])  # còn lại m2, chưa trống -- KHÔNG reset
+            store.delete_meetings([m2])  # giờ mới trống hẳn -- reset
+
+            m3 = store.start_meeting(user_native_lang="vi")
+            assert m3 == 1
+    print("OK: test_delete_meetings_xoa_het_qua_nhieu_lan_rieng_le_van_reset")
+
+
+def test_delete_meetings_db_chua_tung_co_gi_khong_loi_sqlite_sequence():
+    # Phòng vệ: DB mới toanh chưa từng insert gì -> bảng `sqlite_sequence`
+    # chưa tồn tại -- gọi delete_meetings với id lạ (kết quả vẫn trống 0
+    # dòng) KHÔNG được raise lỗi "no such table: sqlite_sequence".
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.db")
+        with MeetingStore(db_path) as store:
+            deleted_count = store.delete_meetings([9999])
+            assert deleted_count == 0
+    print("OK: test_delete_meetings_db_chua_tung_co_gi_khong_loi_sqlite_sequence")
+
+
 if __name__ == "__main__":
     test_start_va_end_meeting()
     test_add_segment_va_get_segments_giu_dung_thu_tu()
@@ -338,4 +544,16 @@ if __name__ == "__main__":
     test_search_meetings_tim_dung_theo_translated_text()
     test_search_meetings_khong_khop_tra_ve_rong()
     test_search_meetings_snippet_bi_cat_ngan_dung_do_dai()
+    test_start_meeting_luu_va_doc_lai_duoc_meeting_context()
+    test_start_meeting_khong_truyen_meeting_context_van_hoat_dong_nhu_cu()
+    test_get_meeting_context_meeting_id_khong_ton_tai_tra_rong()
+    test_migrate_them_cot_meeting_context_cho_db_cu_khong_mat_du_lieu()
+    test_delete_meetings_xoa_dung_meeting_va_du_lieu_lien_quan()
+    test_delete_meetings_nhieu_id_cung_luc()
+    test_delete_meetings_id_khong_ton_tai_khong_raise_loi()
+    test_delete_meetings_danh_sach_rong_tra_ve_0_khong_lam_gi()
+    test_delete_meetings_1_phan_khong_doi_id_cac_phien_con_lai()
+    test_delete_meetings_xoa_het_reset_bo_dem_ve_1()
+    test_delete_meetings_xoa_het_qua_nhieu_lan_rieng_le_van_reset()
+    test_delete_meetings_db_chua_tung_co_gi_khong_loi_sqlite_sequence()
     print("\n=== TẤT CẢ TEST DB PASS ===")

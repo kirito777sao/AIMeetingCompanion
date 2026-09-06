@@ -24,6 +24,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from app.ui.skeleton_loader import SkeletonLoadingWidget
+
 _LANG_OPTIONS = [("en", "English"), ("vi", "Tiếng Việt"), ("zh", "中文")]
 
 
@@ -74,6 +76,22 @@ class AskQuestionDialog(QDialog):
         self._readback_label.setVisible(False)
         layout.addWidget(self._readback_label)
 
+        # 🔒 MỚI (Backlog "Skeleton loading") -- hiện TRONG lúc chờ dịch
+        # xong (set_translating()), thay cho khoảng trống nơi readback sắp
+        # xuất hiện. Ẩn lại khi có kết quả/lỗi.
+        self._skeleton = SkeletonLoadingWidget()
+        self._skeleton.setVisible(False)
+        layout.addWidget(self._skeleton)
+
+    def set_default_target_lang(self, target_lang: str) -> None:
+        """🔒 MỚI (Mục 34) -- cho phép `MainWindow` cập nhật lại "đoán ngôn
+        ngữ đối phương" khi dialog được TÁI SỬ DỤNG (mở lại lần 2 trở đi,
+        xem `_on_ask_question_clicked`) thay vì chỉ đặt 1 lần lúc khởi tạo.
+        Không đụng tới nội dung người dùng đã gõ trong `_input_edit`."""
+        idx = self._lang_combo.findData(target_lang)
+        if idx >= 0:
+            self._lang_combo.setCurrentIndex(idx)
+
     def _on_translate_clicked(self) -> None:
         text = self._input_edit.toPlainText().strip()
         if not text:
@@ -90,8 +108,10 @@ class AskQuestionDialog(QDialog):
         self._status_label.setText("Đang dịch...")
         self._status_label.setProperty("isError", False)
         self._readback_label.setVisible(False)
+        self._skeleton.setVisible(True)  # 🔒 MỚI
 
     def set_error(self, message: str) -> None:
+        self._skeleton.setVisible(False)  # 🔒 MỚI
         self._translate_button.setEnabled(True)
         self._status_label.setText(message)
         self._status_label.setProperty("isError", True)
@@ -99,6 +119,7 @@ class AskQuestionDialog(QDialog):
         self._status_label.style().polish(self._status_label)
 
     def show_readback(self, translated_text: str) -> None:
+        self._skeleton.setVisible(False)  # 🔒 MỚI
         self._translate_button.setEnabled(True)
         self._readback_label.setText(translated_text)
         self._readback_label.setVisible(True)
