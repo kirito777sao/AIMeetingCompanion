@@ -558,3 +558,32 @@ cả `test_ui_smoke.py` (32/32, tăng từ 30, +2: T31) và `test_pipeline.py`
 3. Xem log WARNING mới của T33 (`_log_if_language_outlier`) trong lúc test
    để có con số cụ thể "nhảy ngôn ngữ bao nhiêu lần" thay vì chỉ cảm nhận
    qua mắt.
+
+## Mục 40 (MỚI — theo yêu cầu người dùng: đóng gói .exe phân phối nhiều máy)
+
+- 🔒 T-DB-PATH (✅ done+verified sandbox) — sửa `_DEFAULT_DB_PATH` dùng
+  `get_config_dir()` thay vì chuỗi tương đối "meetings.db" (CONTRACTS.md
+  Mục 40). Bug thật tự phát hiện khi soi code, không phải người dùng báo.
+  - Acceptance: `test_default_db_path_dung_thu_muc_appdata_khong_phai_duong_dan_tuong_doi`
+    PASS. Toàn bộ 35/35 test UI smoke + 9 file test khác PASS.
+  - Dependency: không.
+- 🔒 T-PACKAGING (✅ file đã viết xong, ⚠️ CHƯA verify build thật) —
+  `run_app.py`, `packaging/AIMeetingCompanion.spec`,
+  `packaging/installer.iss`, `packaging/HUONG_DAN_DONG_GOI_EXE.md`
+  (CONTRACTS.md Mục 40).
+  - Acceptance: `run_app.py` import + chạy thử trong sandbox không lỗi
+    (đã verify). Build .exe thật + Inno Setup + cài trên máy khác — CHƯA
+    verify (PyInstaller không cross-compile từ sandbox Linux).
+  - Dependency: T-DB-PATH (phải sửa bug DB TRƯỚC khi đóng gói, nếu không
+    bug sẽ lộ ra ngay trên máy người dùng khác).
+
+**CHƯA làm/CHƯA verify (cần bạn tự làm trên Windows thật)**:
+1. Chạy toàn bộ `packaging/HUONG_DAN_DONG_GOI_EXE.md` từ Bước 0 đến Bước
+   4 trên máy Windows thật, báo lại nếu PyInstaller báo lỗi hidden import
+   thiếu (dùng `console=True` tạm thời để xem traceback thật, xem hướng
+   dẫn "Nếu app KHÔNG mở lên được").
+2. Test file `AIMeetingCompanion_Setup.exe` trên 1 máy KHÁC (hoặc máy ảo
+   sạch chưa từng cài Python) — xác nhận cài không cần quyền Admin, nhập
+   API key mới, ghi âm thử, gỡ cài đặt sạch.
+3. Nếu ổn, gửi file cài đặt cho người dùng thật đầu tiên, thu thập phản
+   hồi trước khi phân phối rộng hơn.

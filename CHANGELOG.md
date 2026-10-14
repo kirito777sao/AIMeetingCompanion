@@ -1241,3 +1241,33 @@ nếu muốn làm sau này):
 - Người dùng đã tự mở app thật (có API key), test kỹ "Nhờ AI trả lời"/"Tôi
   muốn hỏi", xác nhận skeleton animation hiển thị ổn — không cần chỉnh
   màu/tốc độ. Đóng hoàn toàn Mục 39, không còn cảnh báo "CHƯA verify" nào.
+
+## Mục 40 — Sửa bug đường dẫn DB tương đối + chuẩn bị đóng gói .exe
+
+- **Bug thật phát hiện khi soi code trước lúc đóng gói** (không phải
+  người dùng báo): `_DEFAULT_DB_PATH = "meetings.db"` là đường dẫn TƯƠNG
+  ĐỐI, sẽ lỗi ghi transcript nếu .exe cài vào thư mục không có quyền ghi
+  (vd `Program Files`). Sửa dùng `get_config_dir() / "meetings.db"`
+  (`app/ui/main_window.py`) — cùng thư mục `%APPDATA%\AIMeetingCompanion\`
+  với config.json/log, luôn ghi được không cần quyền Admin.
+- Thêm `run_app.py` (project root) — entry point riêng cho PyInstaller,
+  tránh lỗi `ModuleNotFoundError: No module named 'app'` chỉ lộ ra SAU
+  khi đóng gói (do PyInstaller thêm sai cấp thư mục vào `sys.path` nếu
+  trỏ thẳng vào `app/main.py`).
+- Thêm bộ file đóng gói trong `packaging/`: `AIMeetingCompanion.spec`
+  (PyInstaller, onedir, collect_all PySide6), `installer.iss` (Inno
+  Setup, cài không cần quyền Admin qua `{autopf}` +
+  `PrivilegesRequired=lowest`), `HUONG_DAN_DONG_GOI_EXE.md` (hướng dẫn
+  từng bước).
+- Cập nhật `.gitignore`: thêm `.venv-build/`, `packaging/installer_output/`
+  (output đóng gói, không phải source code).
+- 1 test mới (`test_default_db_path_dung_thu_muc_appdata_khong_phai_duong_dan_tuong_doi`,
+  chạy subprocess riêng với `APPDATA` cố định để tránh test pollution).
+- ✅ Verify: 35/35 test UI smoke (tăng từ 34) + 9 file test khác PASS,
+  không hồi quy. Đã mô phỏng `APPDATA` giả xác nhận DB tạo đúng chỗ mới.
+- **CHƯA verify**: build .exe thật trên Windows (PyInstaller không
+  cross-compile được từ sandbox Linux — cần người dùng tự làm theo
+  `packaging/HUONG_DAN_DONG_GOI_EXE.md`), và người dùng KHÁC tự cài +
+  cấu hình API key + dùng thử trên máy riêng của họ.
+- KHÔNG đụng: DB schema, provider, pipeline, UI (ngoại trừ 1 dòng import
+  + 1 dòng constant trong `main_window.py`).
