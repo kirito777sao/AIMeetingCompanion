@@ -48,6 +48,7 @@ from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
 
 from app.logging_setup import get_logger, setup_logging
+from app.ui.capture_protection import install as install_capture_protection
 from app.ui.main_window import MainWindow
 
 _THEME_PATH = Path(__file__).parent / "ui" / "theme.qss"
@@ -137,6 +138,12 @@ def main() -> int:
 
     app = QApplication(sys.argv)
     _apply_theme(app)
+
+    # Ẩn cửa sổ khỏi screen share: bật/tắt lúc đang chạy qua ⚙️ Cài đặt hoặc
+    # phím tắt toàn cục (xem app/ui/capture_protection.py). Trạng thái khởi
+    # động = lựa chọn đã lưu, hoặc AI_MEETING_HIDE_FROM_CAPTURE=1 nếu chưa
+    # từng chọn. PHẢI cài TRƯỚC window.show() và GIỮ tham chiếu để không bị GC.
+    _capture_controller = install_capture_protection(app)  # noqa: F841
 
     window = MainWindow()
     window.show()

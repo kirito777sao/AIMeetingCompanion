@@ -37,6 +37,7 @@ from __future__ import annotations
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QFormLayout,
@@ -49,6 +50,7 @@ from PySide6.QtWidgets import (
 
 from app import config_store
 from app.ai.provider_factory import display_name, get_default_models_for_display
+from app.ui.capture_protection import HOTKEY_LABEL, get_controller as get_capture_controller
 
 # 🔒 MỚI (Backlog #4, CONTRACTS.md Mục 31) -- (field, nhãn hiển thị) theo
 # ĐÚNG thứ tự `_MODEL_OVERRIDE_FIELDS` (config_store.py) -- 1 nguồn DUY
@@ -156,6 +158,27 @@ class SettingsDialog(QDialog):
         note_label.setObjectName("StatusLabel")
         layout.addWidget(note_label)
 
+        # 🔒 MỚI (Mục 41) -- ẩn cửa sổ khỏi screen share. Áp NGAY khi tick
+        # (không cần nút Lưu), cùng trạng thái với phím tắt toàn cục.
+        self._capture_controller = get_capture_controller()
+        self._capture_checkbox = QCheckBox(
+            f"Ẩn cửa sổ app khỏi screen share/recording (phím tắt: {HOTKEY_LABEL})"
+        )
+        layout.addWidget(self._capture_checkbox)
+        self._capture_note = QLabel("")
+        self._capture_note.setWordWrap(True)
+        self._capture_note.setObjectName("StatusLabel")
+        layout.addWidget(self._capture_note)
+        if self._capture_controller is None:
+            self._capture_checkbox.setEnabled(False)
+            self._capture_note.setText(
+                "Chỉ hỗ trợ Windows 10 bản 2004 trở lên (không khả dụng trên máy này)."
+            )
+        else:
+            self._capture_checkbox.toggled.connect(self._on_capture_toggled)
+            self._capture_controller.changed.connect(self._sync_capture_checkbox)
+            self._sync_capture_checkbox()
+
         # 🔒 MỚI (Backlog #4, CONTRACTS.md Mục 31) -- 4 ô model nâng cao,
         # để trống = dùng default (placeholder hiện đúng default hiện tại).
         model_section_label = QLabel(
@@ -211,6 +234,32 @@ class SettingsDialog(QDialog):
         đổi qua nguồn khác từ lần đóng dialog trước tới giờ."""
         super().showEvent(event)
         self._refresh_provider_fields()
+        self._sync_capture_checkbox()  # phím tắt có thể đã đổi trạng thái khi dialog đang đóng
+
+    def _on_capture_toggled(self, checked: bool) -> None:
+        if self._capture_controller is not None:
+            self._capture_controller.set_enabled(checked)  # phát `changed` -> tự đồng bộ nhãn
+
+    def _sync_capture_checkbox(self, *_args) -> None:
+        ctrl = self._capture_controller
+        if ctrl is None:
+            return
+        self._capture_checkbox.blockSignals(True)
+        self._capture_checkbox.setChecked(ctrl.enabled)
+        self._capture_checkbox.blockSignals(False)
+        if ctrl.enabled and ctrl.ok:
+            text = (
+                "🛡 Đang ẩn khỏi screen capture. Không chặn được quay bằng điện "
+                "thoại/capture card. Tắt giữa buổi share = cửa sổ lộ NGAY."
+            )
+        elif ctrl.enabled:
+            text = (
+                "⚠ KHÔNG áp dụng được (cần Windows 10 bản 2004+) — cửa sổ VẪN "
+                "HIỆN trong screen share. Xem app.log."
+            )
+        else:
+            text = "Cửa sổ đang HIỆN bình thường trong screen share."
+        self._capture_note.setText(text)
 
     def _current_provider(self) -> str:
         return self._provider_combo.currentData()

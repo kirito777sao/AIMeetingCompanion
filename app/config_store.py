@@ -591,3 +591,52 @@ def clear_model_overrides(provider: str, base_dir: Optional[Path] = None) -> Non
     provider đó. KHÔNG đụng override của provider khác. Không lỗi nếu
     provider này chưa từng có override nào."""
     save_model_overrides(provider, {}, base_dir=base_dir)
+
+
+# ---------------------------------------------------------------------------
+# UI prefs (file RIÊNG `ui_prefs.json`) -- 🔒 MỚI (Mục 41, ẩn khỏi screen share)
+# ---------------------------------------------------------------------------
+# CỐ Ý không ghi vào config.json: `save_api_key()`, `clear_api_key()` và
+# `set_active_provider()` ở trên DỰNG LẠI toàn bộ payload từ đầu và chỉ giữ
+# lại `providers`/`active_provider`/`model_overrides` -- thêm 1 field mới vào
+# config.json sẽ bị XOÁ MẤT mỗi lần người dùng lưu/đổi API key.
+
+_UI_PREFS_FILE_NAME = "ui_prefs.json"
+_HIDE_FROM_CAPTURE_FIELD = "hide_from_capture"
+
+
+def get_ui_prefs_path(base_dir: Optional[Path] = None) -> Path:
+    return get_config_dir(base_dir) / _UI_PREFS_FILE_NAME
+
+
+def _read_ui_prefs(base_dir: Optional[Path] = None) -> dict:
+    path = get_ui_prefs_path(base_dir)
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def load_hide_from_capture(base_dir: Optional[Path] = None) -> Optional[bool]:
+    """True/False nếu người dùng ĐÃ từng chọn; None nếu chưa từng chọn (để
+    caller rơi về `.env`). File thiếu/hỏng/giá trị lạ -> None (không raise)."""
+    value = _read_ui_prefs(base_dir).get(_HIDE_FROM_CAPTURE_FIELD)
+    return value if isinstance(value, bool) else None
+
+
+def save_hide_from_capture(value: bool, base_dir: Optional[Path] = None) -> None:
+    """Lưu lựa chọn, giữ nguyên các field khác trong ui_prefs.json.
+
+    Raises:
+        ConfigStoreError: không ghi được file (quyền/đĩa)."""
+    payload = _read_ui_prefs(base_dir)
+    payload[_HIDE_FROM_CAPTURE_FIELD] = bool(value)
+    path = get_ui_prefs_path(base_dir)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    except OSError as exc:
+        raise ConfigStoreError(f"Không lưu được tuỳ chọn giao diện tại {path}: {exc}") from exc

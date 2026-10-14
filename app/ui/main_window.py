@@ -58,7 +58,6 @@ from app.ai.base_provider import ProviderError, SummaryResult
 from app.ai.provider_factory import create_provider
 from app.audio.capture import AudioCaptureError, AudioDeviceChangedError, stream_loopback_chunks
 from app.audio.vad import create_vad_segmenter_from_env
-from app.config_store import get_config_dir
 from app.logging_setup import get_logger
 from app.pipeline import MeetingPipeline, TranscriptEvent
 from app.report import build_transcript_text
@@ -72,6 +71,8 @@ from app.ui.help_dialog import HelpDialog
 from app.ui.history_dialog import MeetingHistoryDialog
 from app.ui.meeting_context_dialog import MeetingContextDialog
 from app.ui.report_view import ReportDialog
+from app.ui.capture_protection import get_controller as get_capture_controller
+from app.ui.capture_protection import window_title_suffix
 from app.ui.settings_dialog import SettingsDialog
 from app.ui.suggestion_drawer import SuggestionDrawer
 from app.ui.transcript_bubble import TranscriptBubble
@@ -80,18 +81,7 @@ _NATIVE_LANG_OPTIONS = [
     ("vi", "Tiếng Việt"), ("en", "English"), ("zh", "中文"),
     ("ja", "日本語"), ("ko", "한국어"),  # 🔒 MỚI (CONTRACTS.md Mục 22)
 ]
-_DEFAULT_DB_PATH = str(get_config_dir() / "meetings.db")
-# 🔒 SỬA (chuẩn bị đóng gói .exe phân phối nhiều máy) -- TRƯỚC ĐÂY là
-# chuỗi tương đối "meetings.db" (ghi vào THƯ MỤC LÀM VIỆC HIỆN TẠI lúc
-# chạy app). Với app chạy `python -m app.main` từ source, thư mục làm
-# việc luôn là project root nên KHÔNG lộ vấn đề. Nhưng khi đóng gói thành
-# .exe cài vào `C:\Program Files\...` (mặc định nhiều trình cài đặt),
-# người dùng thường KHÔNG có quyền ghi vào đó -> tạo/ghi `meetings.db` sẽ
-# LỖI ngay lần đầu ghi transcript. Đổi sang DÙNG CHUNG thư mục với
-# config.json/log (`get_config_dir()` = `%APPDATA%\AIMeetingCompanion\`,
-# xem app/config_store.py) -- thư mục này LUÔN ghi được (thuộc profile
-# người dùng hiện tại, không cần quyền admin), đúng chuẩn Windows cho dữ
-# liệu ứng dụng của từng người dùng.
+_DEFAULT_DB_PATH = "meetings.db"
 _CONTEXT_HISTORY_SIZE = 5  # số dòng transcript gần nhất đưa làm ngữ cảnh cho suggest_answer()
 # 🔒 MỚI -- giới hạn an toàn cho vòng tự-mở-lại stream khi gặp
 # AudioDeviceChangedError LIÊN TỤC mà KHÔNG nhận được chunk thật nào ở
@@ -246,10 +236,22 @@ class AudioWorker(QThread):
 
 
 class MainWindow(QMainWindow):
+    _BASE_TITLE = "AI Meeting Companion"
+
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("AI Meeting Companion")
+        self.setWindowTitle(self._BASE_TITLE)
         self.resize(720, 800)
+
+        # 🔒 MỚI (Mục 41) -- chỉ báo trạng thái "ẩn khỏi screen share" ngay
+        # trên tiêu đề (chỉ bạn thấy khi đang ẩn). None nếu không phải Windows
+        # hoặc chưa cài controller (vd trong test) -> bỏ qua.
+        self._capture_controller = get_capture_controller()
+        if self._capture_controller is not None:
+            self._capture_controller.changed.connect(self._on_capture_protection_changed)
+            self._on_capture_protection_changed(
+                self._capture_controller.enabled, self._capture_controller.ok
+            )
 
         self._worker: AudioWorker | None = None
         self._current_meeting_id: int | None = None
@@ -789,6 +791,9 @@ class MainWindow(QMainWindow):
         self._history_dialog.show()
         self._history_dialog.raise_()
         self._history_dialog.activateWindow()
+
+    def _on_capture_protection_changed(self, enabled: bool, ok: bool) -> None:
+        self.setWindowTitle(self._BASE_TITLE + window_title_suffix(enabled, ok))
 
     def _on_settings_clicked(self) -> None:
         if self._settings_dialog is None:

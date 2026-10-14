@@ -1242,32 +1242,71 @@ nếu muốn làm sau này):
   muốn hỏi", xác nhận skeleton animation hiển thị ổn — không cần chỉnh
   màu/tốc độ. Đóng hoàn toàn Mục 39, không còn cảnh báo "CHƯA verify" nào.
 
-## Mục 40 — Sửa bug đường dẫn DB tương đối + chuẩn bị đóng gói .exe
+## Mục 40 — Ẩn cửa sổ khỏi screen share (T37–T39)
 
-- **Bug thật phát hiện khi soi code trước lúc đóng gói** (không phải
-  người dùng báo): `_DEFAULT_DB_PATH = "meetings.db"` là đường dẫn TƯƠNG
-  ĐỐI, sẽ lỗi ghi transcript nếu .exe cài vào thư mục không có quyền ghi
-  (vd `Program Files`). Sửa dùng `get_config_dir() / "meetings.db"`
-  (`app/ui/main_window.py`) — cùng thư mục `%APPDATA%\AIMeetingCompanion\`
-  với config.json/log, luôn ghi được không cần quyền Admin.
-- Thêm `run_app.py` (project root) — entry point riêng cho PyInstaller,
-  tránh lỗi `ModuleNotFoundError: No module named 'app'` chỉ lộ ra SAU
-  khi đóng gói (do PyInstaller thêm sai cấp thư mục vào `sys.path` nếu
-  trỏ thẳng vào `app/main.py`).
-- Thêm bộ file đóng gói trong `packaging/`: `AIMeetingCompanion.spec`
-  (PyInstaller, onedir, collect_all PySide6), `installer.iss` (Inno
-  Setup, cài không cần quyền Admin qua `{autopf}` +
-  `PrivilegesRequired=lowest`), `HUONG_DAN_DONG_GOI_EXE.md` (hướng dẫn
-  từng bước).
-- Cập nhật `.gitignore`: thêm `.venv-build/`, `packaging/installer_output/`
-  (output đóng gói, không phải source code).
-- 1 test mới (`test_default_db_path_dung_thu_muc_appdata_khong_phai_duong_dan_tuong_doi`,
-  chạy subprocess riêng với `APPDATA` cố định để tránh test pollution).
-- ✅ Verify: 35/35 test UI smoke (tăng từ 34) + 9 file test khác PASS,
-  không hồi quy. Đã mô phỏng `APPDATA` giả xác nhận DB tạo đúng chỗ mới.
-- **CHƯA verify**: build .exe thật trên Windows (PyInstaller không
-  cross-compile được từ sandbox Linux — cần người dùng tự làm theo
-  `packaging/HUONG_DAN_DONG_GOI_EXE.md`), và người dùng KHÁC tự cài +
-  cấu hình API key + dùng thử trên máy riêng của họ.
-- KHÔNG đụng: DB schema, provider, pipeline, UI (ngoại trừ 1 dòng import
-  + 1 dòng constant trong `main_window.py`).
+**Quyết định** (ghi trước khi code): thêm vào app PySide6 hiện có (KHÔNG
+làm app mới, KHÔNG Electron). Dùng `SetWindowDisplayAffinity(0x11)` qua
+`ctypes`; MẶC ĐỊNH TẮT, bật bằng `AI_MEETING_HIDE_FROM_CAPTURE=1`; không
+fallback `WDA_MONITOR` (hiện khối đen -> lộ); áp cho mọi top-level window
+qua event filter ở QApplication. Chat trực tiếp với AI đã có sẵn ("💬 Hỏi
+AI", Mục 21) -- không làm lại.
+
+**File thay đổi**: `app/ui/capture_protection.py` (MỚI), `app/main.py`
+(+2 dòng import/cài filter), `.env.example` (+1 biến), `tests/test_capture_protection.py`
+(MỚI, 5 test).
+
+**Trade-off**: không có nút bật/tắt lúc đang chạy (cần restart app khi đổi
+`.env`) -- chưa làm vì sẽ đụng `main_window.py`/Settings (ASK FIRST).
+
+**CHƯA verify (cần bạn tự test trên Windows thật)**:
+1. Đặt `AI_MEETING_HIDE_FROM_CAPTURE=1`, chạy app, share màn hình/cửa sổ
+   trong Zoom/Teams/Meet tới 1 máy/tài khoản khác -> cửa sổ chính, "Hỏi AI",
+   drawer gợi ý, Settings, menu chuột phải đều KHÔNG hiện bên người xem.
+2. Thử quay bằng OBS (Display Capture + Window Capture) và Win+Shift+S.
+3. Nếu máy Windows < 10 bản 2004: xem log có cảnh báo `capture_protection`.
+
+## Mục 41 — Bật/tắt ẩn khỏi screen share lúc đang chạy (T40, T42–T44)
+
+**Quyết định** (theo yêu cầu người dùng: làm CẢ checkbox lẫn phím tắt):
+- `capture_protection.py` đổi từ "filter bật 1 lần" thành
+  `CaptureProtectionController` (bật/tắt lúc chạy, signal `changed(enabled, ok)`).
+- Checkbox trong ⚙️ Cài đặt áp NGAY khi tick (không qua nút Lưu).
+- Phím tắt toàn cục `Ctrl+Alt+Shift+F9` (module mới `global_hotkey.py`,
+  `RegisterHotKey` + native event filter). Chọn tổ hợp dài, khó bấm nhầm
+  vì bấm nhầm = lộ cửa sổ; tránh `Ctrl+Shift+H` (theo mình nhớ là "cúp máy" Teams).
+- Tiêu đề cửa sổ chính là chỉ báo trạng thái: `🛡` đang ẩn, `⚠` bật nhưng
+  API thất bại (KHÔNG giả vờ an toàn). Không dùng beep/âm thanh -- có thể lọt
+  vào audio cuộc họp.
+- Trạng thái khởi động = lựa chọn đã lưu; chưa từng chọn thì theo `.env`.
+
+**PHÁT HIỆN QUAN TRỌNG** (bài học ghi nhớ): `save_api_key()`,
+`clear_api_key()`, `set_active_provider()` dựng lại TOÀN BỘ payload
+config.json và chỉ giữ `providers`/`active_provider`/`model_overrides` --
+thêm field mới vào config.json sẽ bị XOÁ mỗi lần lưu API key. Vì vậy lựa
+chọn được lưu ở FILE RIÊNG `ui_prefs.json` (cùng thư mục), có test chứng
+minh sống sót qua save_api_key/set_active_provider/clear_api_key. KHÔNG
+sửa các hàm cũ.
+
+**File thay đổi**: `app/ui/capture_protection.py` (viết lại),
+`app/ui/global_hotkey.py` (MỚI), `app/config_store.py` (chỉ NỐI THÊM 3 hàm
+`*_hide_from_capture`/`get_ui_prefs_path`), `app/ui/settings_dialog.py`
+(+checkbox), `app/ui/main_window.py` (+tiêu đề trạng thái), `app/main.py`,
+`.env.example`, `tests/test_capture_protection.py` (5 -> 19 test).
+
+**Trade-off / rủi ro còn lại**:
+- Tắt bằng phím tắt giữa buổi share = cửa sổ lộ NGAY với người xem.
+- Phím tắt cố định, chưa cho đổi trong Settings. Nếu bị app khác chiếm,
+  app chỉ log cảnh báo và checkbox vẫn dùng được.
+- `HelpDialog` chưa nhắc phím tắt (không đụng trong lượt này).
+- Cửa sổ tạo SAU khi bật được áp ở `WinIdChange`/`Show` -- chưa đo được
+  có khoảng hở 1 frame hay không trên máy thật.
+
+**CHƯA verify (cần bạn tự test trên Windows thật)**:
+1. Bỏ `QT_QPA_PLATFORM` (nếu còn từ lần trước), chạy `python -m app.main`,
+   tick checkbox trong ⚙️ -> tiêu đề đổi sang `🛡`; xem `app.log` KHÔNG có
+   cảnh báo `SetWindowDisplayAffinity`.
+2. Bấm `Ctrl+Alt+Shift+F9` khi Zoom/Teams đang giữ focus -> tiêu đề app đổi
+   🛡 <-> không; mở lại Settings thấy checkbox khớp.
+3. Share màn hình tới tài khoản khác: lúc 🛡 người xem KHÔNG thấy app (cả
+   Settings, menu chuột phải); tắt đi thì thấy.
+4. Đóng app, mở lại: trạng thái được giữ đúng như lần chọn cuối.

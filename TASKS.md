@@ -559,31 +559,29 @@ cả `test_ui_smoke.py` (32/32, tăng từ 30, +2: T31) và `test_pipeline.py`
    để có con số cụ thể "nhảy ngôn ngữ bao nhiêu lần" thay vì chỉ cảm nhận
    qua mắt.
 
-## Mục 40 (MỚI — theo yêu cầu người dùng: đóng gói .exe phân phối nhiều máy)
+## Mục 40 — Ẩn cửa sổ khỏi screen share (xem CHANGELOG.md)
 
-- 🔒 T-DB-PATH (✅ done+verified sandbox) — sửa `_DEFAULT_DB_PATH` dùng
-  `get_config_dir()` thay vì chuỗi tương đối "meetings.db" (CONTRACTS.md
-  Mục 40). Bug thật tự phát hiện khi soi code, không phải người dùng báo.
-  - Acceptance: `test_default_db_path_dung_thu_muc_appdata_khong_phai_duong_dan_tuong_doi`
-    PASS. Toàn bộ 35/35 test UI smoke + 9 file test khác PASS.
-  - Dependency: không.
-- 🔒 T-PACKAGING (✅ file đã viết xong, ⚠️ CHƯA verify build thật) —
-  `run_app.py`, `packaging/AIMeetingCompanion.spec`,
-  `packaging/installer.iss`, `packaging/HUONG_DAN_DONG_GOI_EXE.md`
-  (CONTRACTS.md Mục 40).
-  - Acceptance: `run_app.py` import + chạy thử trong sandbox không lỗi
-    (đã verify). Build .exe thật + Inno Setup + cài trên máy khác — CHƯA
-    verify (PyInstaller không cross-compile từ sandbox Linux).
-  - Dependency: T-DB-PATH (phải sửa bug DB TRƯỚC khi đóng gói, nếu không
-    bug sẽ lộ ra ngay trên máy người dùng khác).
+- 🔒 T37 (✅ done+verified offline) — `app/ui/capture_protection.py`: event
+  filter áp `WDA_EXCLUDEFROMCAPTURE` cho mọi top-level window. Acceptance:
+  đúng HWND + cờ 0x11, child widget không bị áp riêng, lỗi không crash và
+  chỉ log 1 lần, tắt/không-Windows -> không cài filter.
+- 🔒 T38 (✅ done+verified offline) — nối vào `app/main.py` + `.env.example`.
+- 🔒 T39 (✅ done+verified offline) — `tests/test_capture_protection.py`.
+- ⚪ T40 (CHỜ xác nhận người dùng) — nút/checkbox bật-tắt lúc đang chạy
+  (Settings hoặc phím tắt), lưu qua `config_store`. Đụng `settings_dialog.py`.
+- ⚪ T41 (CHỜ test Windows thật) — xác nhận hành vi với Zoom/Teams/OBS.
 
-**CHƯA làm/CHƯA verify (cần bạn tự làm trên Windows thật)**:
-1. Chạy toàn bộ `packaging/HUONG_DAN_DONG_GOI_EXE.md` từ Bước 0 đến Bước
-   4 trên máy Windows thật, báo lại nếu PyInstaller báo lỗi hidden import
-   thiếu (dùng `console=True` tạm thời để xem traceback thật, xem hướng
-   dẫn "Nếu app KHÔNG mở lên được").
-2. Test file `AIMeetingCompanion_Setup.exe` trên 1 máy KHÁC (hoặc máy ảo
-   sạch chưa từng cài Python) — xác nhận cài không cần quyền Admin, nhập
-   API key mới, ghi âm thử, gỡ cài đặt sạch.
-3. Nếu ổn, gửi file cài đặt cho người dùng thật đầu tiên, thu thập phản
-   hồi trước khi phân phối rộng hơn.
+## Mục 41 — Bật/tắt lúc đang chạy (xem CHANGELOG.md)
+
+- 🔒 T40 (✅ done+verified offline) — checkbox trong ⚙️ Cài đặt, lưu qua
+  `ui_prefs.json` (file riêng, xem lý do ở CHANGELOG Mục 41).
+- 🔒 T42 (✅ done+verified offline) — `CaptureProtectionController` bật/tắt
+  lúc chạy + chỉ báo trạng thái trên tiêu đề cửa sổ.
+- 🔒 T43 (✅ done+verified offline) — phím tắt toàn cục `Ctrl+Alt+Shift+F9`
+  (`app/ui/global_hotkey.py`).
+- 🔒 T44 (✅ done+verified offline) — 14 test mới (controller, hotkey,
+  ui_prefs, SettingsDialog).
+- ⚪ T41 (CHỜ test Windows thật) — Zoom/Teams/OBS + phím tắt thật (checklist
+  ở CHANGELOG Mục 41).
+- ⚪ T45 (chưa chốt, ASK FIRST) — nhắc phím tắt trong HelpDialog; cho đổi
+  tổ hợp phím trong Settings.
