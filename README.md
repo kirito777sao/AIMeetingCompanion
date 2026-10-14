@@ -2,12 +2,6 @@
 
 **Trợ lý họp đa ngôn ngữ thời gian thực — phụ đề song ngữ, gợi ý trả lời ngược ngôn ngữ, tự động tổng hợp biên bản.**
 
-![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
-![PySide6](<https://img.shields.io/badge/UI-PySide6%20(Qt)-41CD52?logo=qt&logoColor=white>)
-![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows&logoColor=white)
-![License](https://img.shields.io/badge/License-MIT-blue.svg)
-![Status](https://img.shields.io/badge/Status-Phase%203%20hoàn thiện-success)
-
 > ⚠️ **Cảnh báo sử dụng**: Công cụ này hỗ trợ cá nhân ghi chú & chuẩn bị trong cuộc họp. Người dùng cần tự tuân thủ quy định nội bộ công ty và pháp luật về ghi âm tại nơi làm việc. Toàn bộ dữ liệu được lưu **cục bộ trên máy**, không upload mặc định lên bất kỳ server nào ngoài các lệnh gọi API AI mà người dùng tự cấu hình.
 
 ---
@@ -17,6 +11,7 @@
 - [Giới thiệu](#-giới-thiệu)
 - [Vấn đề & giải pháp](#-vấn-đề--giải-pháp)
 - [Tính năng chính](#-tính-năng-chính)
+- [Ẩn cửa sổ khỏi screen share](#️-ẩn-cửa-sổ-khỏi-screen-share)
 - [Kiến trúc hệ thống](#-kiến-trúc-hệ-thống)
 - [Công nghệ sử dụng](#-công-nghệ-sử-dụng)
 - [Cấu trúc thư mục](#-cấu-trúc-thư-mục)
@@ -59,24 +54,25 @@
 
 ## ✨ Tính năng chính
 
-| #   | Chức năng                                                                     | Trạng thái                                        |
-| --- | ----------------------------------------------------------------------------- | ------------------------------------------------- |
-| F1  | Thu audio loopback hệ thống, tự phục hồi khi đổi thiết bị phát                | ✅ Hoàn thiện                                     |
-| F2  | STT thời gian thực, tự cắt theo câu/khoảng lặng (VAD)                         | ✅ Hoàn thiện                                     |
-| F3  | Tự nhận diện ngôn ngữ mỗi câu (Anh/Việt/Trung/Nhật/Hàn...)                    | ✅ Hoàn thiện                                     |
-| F4  | Hiển thị transcript song ngữ (bubble gốc + bản dịch) theo thời gian thực      | ✅ Hoàn thiện                                     |
-| F5  | Nút "Nhờ AI trả lời" gắn theo từng câu được nhận diện là câu hỏi              | ✅ Hoàn thiện                                     |
-| F6  | Khung gợi ý trả lời bằng tiếng mẹ đẻ, cho sửa tự do                           | ✅ Hoàn thiện                                     |
-| F7  | Dịch ngược bản đã sửa sang ngôn ngữ người hỏi, hiển thị to dễ đọc             | ✅ Hoàn thiện                                     |
-| F8  | Banner cảnh báo đang ghi âm, hiển thị liên tục                                | ✅ Hoàn thiện                                     |
-| F9  | Lưu transcript đầy đủ theo phiên họp (SQLite local)                           | ✅ Hoàn thiện                                     |
-| F10 | Cuối họp: AI tổng hợp biên bản (tóm tắt/quyết định/việc cần làm)              | ✅ Hoàn thiện                                     |
-| F11 | Xuất biên bản ra `.docx` và `.pdf` (hỗ trợ tiếng Việt có dấu)                 | ✅ Hoàn thiện                                     |
-| F13 | Lịch sử các cuộc họp cũ, tìm kiếm theo nội dung transcript                    | ✅ Hoàn thiện                                     |
-| F14 | Chọn provider AI (**Groq / OpenAI / Gemini**) trong Settings, tự nhập API key | ✅ Hoàn thiện                                     |
-| F16 | Nhập trước **bối cảnh cuộc họp** (gõ tay + tải file `.txt`/`.md`) để "Nhờ AI trả lời" gợi ý sát tình huống hơn | ✅ Hoàn thiện (Vòng 9)                            |
-| F12 | Phân biệt người nói (diarization)                                             | ⏳ Chưa làm (Phase 4, cân nhắc theo nhu cầu thật) |
-| F15 | Chế độ hoàn toàn offline (STT local bằng `faster-whisper`)                    | ⏳ Chưa làm (Phase 4, cân nhắc theo nhu cầu thật) |
+| #   | Chức năng                                                                                                                                                                                    | Trạng thái                                        |
+| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| F1  | Thu audio loopback hệ thống, tự phục hồi khi đổi thiết bị phát                                                                                                                               | ✅ Hoàn thiện                                     |
+| F2  | STT thời gian thực, tự cắt theo câu/khoảng lặng (VAD)                                                                                                                                        | ✅ Hoàn thiện                                     |
+| F3  | Tự nhận diện ngôn ngữ mỗi câu (Anh/Việt/Trung/Nhật/Hàn...)                                                                                                                                   | ✅ Hoàn thiện                                     |
+| F4  | Hiển thị transcript song ngữ (bubble gốc + bản dịch) theo thời gian thực                                                                                                                     | ✅ Hoàn thiện                                     |
+| F5  | Nút "Nhờ AI trả lời" gắn theo từng câu được nhận diện là câu hỏi                                                                                                                             | ✅ Hoàn thiện                                     |
+| F6  | Khung gợi ý trả lời bằng tiếng mẹ đẻ, cho sửa tự do                                                                                                                                          | ✅ Hoàn thiện                                     |
+| F7  | Dịch ngược bản đã sửa sang ngôn ngữ người hỏi, hiển thị to dễ đọc                                                                                                                            | ✅ Hoàn thiện                                     |
+| F8  | Banner cảnh báo đang ghi âm, hiển thị liên tục                                                                                                                                               | ✅ Hoàn thiện                                     |
+| F9  | Lưu transcript đầy đủ theo phiên họp (SQLite local)                                                                                                                                          | ✅ Hoàn thiện                                     |
+| F10 | Cuối họp: AI tổng hợp biên bản (tóm tắt/quyết định/việc cần làm)                                                                                                                             | ✅ Hoàn thiện                                     |
+| F11 | Xuất biên bản ra `.docx` và `.pdf` (hỗ trợ tiếng Việt có dấu)                                                                                                                                | ✅ Hoàn thiện                                     |
+| F13 | Lịch sử các cuộc họp cũ, tìm kiếm theo nội dung transcript                                                                                                                                   | ✅ Hoàn thiện                                     |
+| F14 | Chọn provider AI (**Groq / OpenAI / Gemini**) trong Settings, tự nhập API key                                                                                                                | ✅ Hoàn thiện                                     |
+| F16 | Nhập trước **bối cảnh cuộc họp** (gõ tay + tải file `.txt`/`.md`) để "Nhờ AI trả lời" gợi ý sát tình huống hơn                                                                               | ✅ Hoàn thiện (Vòng 9)                            |
+| F17 | **Ẩn toàn bộ cửa sổ app khỏi screen share/quay màn hình** (bật/tắt bằng ⚙️ Cài đặt hoặc phím tắt `Ctrl+Alt+Shift+F9`) — xem mục [Ẩn cửa sổ khỏi screen share](#️-ẩn-cửa-sổ-khỏi-screen-share) | ✅ Hoàn thiện (cần Windows 10 bản 2004+)          |
+| F12 | Phân biệt người nói (diarization)                                                                                                                                                            | ⏳ Chưa làm (Phase 4, cân nhắc theo nhu cầu thật) |
+| F15 | Chế độ hoàn toàn offline (STT local bằng `faster-whisper`)                                                                                                                                   | ⏳ Chưa làm (Phase 4, cân nhắc theo nhu cầu thật) |
 
 ### Một số chi tiết đáng chú ý
 
@@ -84,6 +80,49 @@
 - **Không bịa thông tin**: khi tổng hợp biên bản hoặc soạn gợi ý trả lời, AI được yêu cầu rõ trả về placeholder (`[số liệu cụ thể]`) hoặc danh sách rỗng nếu không có dữ liệu thật trong transcript, thay vì tự sinh số liệu nghe có vẻ hợp lý.
 - **Đa nhà cung cấp AI thật, không chỉ cấu hình giả**: `OpenAICompatProvider` dùng chung logic dịch/gợi ý/tóm tắt cho cả 3 provider qua SDK `openai` (chỉ đổi `base_url`); riêng Gemini không có API kiểu Whisper cho STT nên `GeminiProvider.transcribe()` được viết tách riêng, gọi REST `generateContent` trực tiếp qua `httpx`.
 - **Bối cảnh cuộc họp (Vòng 9, F16)**: trước khi bấm "Bắt đầu ghi", có thể mô tả trước ai nói với ai/mục đích gì (phỏng vấn, họp công việc, trò chơi...) — nhập tay hoặc tải file `.txt`/`.md` (dùng được cả 2 cách cùng lúc), lưu lại theo phiên họp, dùng cho "Nhờ AI trả lời" trong suốt phiên. **Phạm vi hiện tại chỉ áp dụng cho `suggest_answer()`** — CHƯA áp dụng cho dịch transcript realtime hay tổng hợp biên bản cuối (xem CONTRACTS.md Mục 18 lý do đánh đổi độ trễ).
+
+---
+
+## 🛡️ Ẩn cửa sổ khỏi screen share
+
+Khi bạn đang chia sẻ màn hình (Google Meet, Zoom, Teams...) hoặc quay màn hình (OBS...), **mọi cửa sổ của app** — cửa sổ chính, "Hỏi AI", khung gợi ý trả lời, ⚙️ Cài đặt, menu chuột phải — có thể được ẩn khỏi hình người xem thấy, trong khi **bạn vẫn nhìn thấy bình thường** trên màn hình của mình. Trên Windows đủ mới (10 bản 2004+ / 11), người xem thấy phần nền phía sau như thể app không tồn tại — **dự kiến không có khối đen** (⚠️ phần này **chưa test trên máy thật**, xem [Giới hạn thật](#giới-hạn-thật-không-nhận-vơ)). Trên Windows cũ hơn, nội dung vẫn bị ẩn nhưng người xem thấy **một khối đen** — xem bên dưới.
+
+### Cách dùng
+
+| Cách                          | Chi tiết                                                                                                        |
+| ----------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Checkbox trong ⚙️ **Cài đặt** | Tick là áp dụng **ngay**, không cần bấm Lưu. Lựa chọn được nhớ cho lần mở app sau (file `ui_prefs.json`).       |
+| Phím tắt toàn cục             | `Ctrl+Alt+Shift+F9` — bật/tắt ngay cả khi Zoom/Meet/Teams đang giữ focus. Cố ý chọn tổ hợp dài để khó bấm nhầm. |
+| `.env` (tuỳ chọn)             | `AI_MEETING_HIDE_FROM_CAPTURE=1` — chỉ dùng làm giá trị khởi đầu nếu bạn chưa từng chọn trong Cài đặt.          |
+
+**Mặc định là TẮT** (bản `.exe` phát cho người khác dùng, cửa sổ "tự biến mất" khi quay màn hình mà chưa được báo trước sẽ gây bất ngờ).
+
+Tiêu đề cửa sổ chính là chỉ báo trạng thái (chỉ bạn thấy):
+
+- `🛡 (ẩn khỏi share)` — đã áp dụng cờ ẩn thành công (trên Windows cũ, nội dung bị ẩn nhưng có thể hiện khối đen — xem bên dưới).
+- `⚠ (KHÔNG ẩn được khỏi share)` — đã bật nhưng hệ điều hành từ chối lệnh; cửa sổ vẫn hiện với người xem. Chi tiết trong ⚙️ Cài đặt và `app.log`.
+- Không có hậu tố — tính năng đang tắt, cửa sổ hiện bình thường.
+
+### Cơ chế & yêu cầu
+
+App gọi `SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)` (qua `ctypes`, không thêm dependency) cho **mọi cửa sổ cấp cao nhất** thông qua 1 event filter ở tầng `QApplication`.
+
+> ⚠️ **Ẩn "sạch" (không khối đen) cần Windows 10 bản 2004 (build 19041) trở lên, hoặc Windows 11.** Trên Windows cũ hơn (vd build 17763 = Windows 10 1809), hệ điều hành **âm thầm** xử lý cờ này như `WDA_MONITOR` — API vẫn báo "thành công" nhưng người xem (và cả ảnh chụp màn hình) thấy **một khối đen** đè đúng chỗ cửa sổ. Đây là hành vi của Windows, app **không** xử lý riêng: trên máy cũ app vẫn bật ẩn như bình thường (nội dung bị ẩn, nhưng còn khối đen). Nếu khối đen gây phiền khi share, hãy tắt tính năng, hoặc share **từng cửa sổ/tab** thay vì toàn màn hình, hoặc đặt app ở màn hình phụ.
+
+Kiểm tra bản Windows của bạn: nhấn `Win + R`, gõ `winver`, hoặc chạy:
+
+```powershell
+python -c "import sys; print(sys.getwindowsversion().build)"   # >= 19041 thì ẩn sạch
+```
+
+### Giới hạn thật (không nhận vơ)
+
+- Chỉ chặn capture ở **tầng hệ điều hành**. **Không** chặn: quay bằng điện thoại/máy ảnh, capture card phần cứng, phần mềm giám sát cấp driver/kernel. Đây không phải cơ chế bảo mật hay DRM.
+- Cần **Desktop Window Manager** đang hoạt động (bình thường trên Windows 10/11; có thể không hiệu quả trong một số phiên Remote Desktop/máy ảo).
+- **Tắt giữa buổi share = cửa sổ lộ NGAY** với mọi người đang xem. Hãy nhìn tiêu đề `🛡` trước khi chia sẻ.
+- **Chưa verify trên Windows >= 19041 + Meet/Zoom/Teams/OBS thật**: hành vi "không khối đen" trên máy mới là kỳ vọng theo tài liệu Microsoft, chưa được test thật. Đã test thật trên Windows build 17763 (Google Meet): nội dung bị ẩn, còn khối đen.
+- Nếu máy mới vẫn có khối đen hoặc `⚠`: thử cập nhật driver card đồ hoạ, tắt/bật lại share, và ghi lại số build, GPU, chế độ share (toàn màn hình/cửa sổ/tab) cùng `app.log` để chẩn đoán — một số cấu hình GPU/trình duyệt có thể xử lý cờ này khác chuẩn.
+- Phím tắt cố định (chưa cho đổi trong Settings); nếu bị app khác chiếm, app chỉ ghi cảnh báo vào log và checkbox vẫn dùng được.
 
 ---
 
@@ -254,7 +293,9 @@ ai-meeting-companion/
 │       ├── ask_question_dialog.py # "Tôi muốn hỏi" — chiều ngược lại
 │       ├── report_view.py         # Dialog xem/tạo lại/xuất biên bản
 │       ├── history_dialog.py      # Xem/tìm lại phiên họp cũ
-│       ├── settings_dialog.py     # Chọn provider AI + nhập API key
+│       ├── settings_dialog.py     # Chọn provider AI + nhập API key + checkbox ẩn khỏi share
+│       ├── capture_protection.py  # Ẩn mọi cửa sổ khỏi screen share (WDA_EXCLUDEFROMCAPTURE)
+│       ├── global_hotkey.py       # Phím tắt toàn cục Ctrl+Alt+Shift+F9 (RegisterHotKey)
 │       ├── ai_worker.py           # OneShotAIWorker — chạy 1 lệnh AI trên thread riêng
 │       └── theme.qss              # Dark-mode theme
 ├── scripts/                       # Script test riêng từng phần qua terminal (debug nhanh)
@@ -270,7 +311,7 @@ ai-meeting-companion/
 
 ### Yêu cầu
 
-- Windows 10/11 (audio loopback WASAPI là tính năng riêng của Windows)
+- Windows 10/11 (audio loopback WASAPI là tính năng riêng của Windows). Riêng tính năng [ẩn cửa sổ khỏi screen share](#️-ẩn-cửa-sổ-khỏi-screen-share) cần **Windows 10 bản 2004 (build 19041) trở lên**
 - Python 3.11+
 - API key của **ít nhất 1** trong 3 provider: [Groq](https://console.groq.com) (miễn phí, khuyến nghị bắt đầu), [OpenAI](https://platform.openai.com), hoặc [Gemini](https://ai.google.dev)
 
@@ -329,12 +370,13 @@ python tests/test_pipeline.py
 python tests/test_report_export.py
 python tests/test_config_store.py
 python tests/test_capture.py
+python -m pytest tests/test_capture_protection.py -v       # ẩn khỏi screen share (25 test, user32 giả)
 QT_QPA_PLATFORM=offscreen python tests/test_ui_smoke.py   # bỏ biến này trên Windows có màn hình thật
 ```
 
 Phạm vi test bao phủ: logic cắt segment VAD, logic transcribe/translate/suggest_answer/summarize của cả 3 provider (kể cả lựa chọn qua `provider_factory`), schema + CRUD SQLite, ghép nối toàn pipeline (kể cả lọc hallucination qua `no_speech_prob`), nội dung + font khi xuất `.docx`/`.pdf`, lưu/đọc API key local, phát hiện đổi thiết bị phát âm thanh, và toàn bộ wiring UI ↔ thread ↔ DB không bị treo/crash.
 
-**Không thể test được trong môi trường CI/sandbox** (cần xác nhận thủ công trên Windows thật): chất lượng output thật của AI (độ chính xác STT, độ tự nhiên bản dịch), độ trễ network thật, audio loopback thật, mã hoá DPAPI thật, hiển thị đúng dấu tiếng Việt khi xuất PDF với font hệ thống "Segoe UI".
+**Không thể test được trong môi trường CI/sandbox** (cần xác nhận thủ công trên Windows thật): chất lượng output thật của AI (độ chính xác STT, độ tự nhiên bản dịch), độ trễ network thật, audio loopback thật, mã hoá DPAPI thật, hiển thị đúng dấu tiếng Việt khi xuất PDF với font hệ thống "Segoe UI", và **hành vi thật của tính năng ẩn cửa sổ khỏi screen share** với từng phần mềm họp/quay màn hình (test chỉ dùng `user32` giả để kiểm tra đúng HWND, đúng cờ, đúng nhánh lỗi).
 
 ---
 
@@ -363,7 +405,7 @@ Kết quả nằm tại `dist/AIMeetingCompanion/AIMeetingCompanion.exe`, chạy
 | Phase 2            | Trợ lý trả lời — gợi ý, sửa, dịch ngược (F5-F7)                                               | ✅                                                                                                                                         |
 | Phase 3            | Biên bản cuộc họp — tổng hợp, xuất file, lịch sử (F10, F11, F13)                              | ✅                                                                                                                                         |
 | _Mở rộng_          | Multi-provider AI — Groq/OpenAI/Gemini, mỗi người tự chọn + tự nhập key (F14)                 | ✅                                                                                                                                         |
-| _Mở rộng_          | Bối cảnh cuộc họp cho "Nhờ AI trả lời" + skin UI `qt_material` tuỳ chọn (F16, Vòng 9)          | ✅ (chưa tự verify UI thật trên Windows — xem CONTRACTS.md Mục 18.3)                                                                       |
+| _Mở rộng_          | Bối cảnh cuộc họp cho "Nhờ AI trả lời" + skin UI `qt_material` tuỳ chọn (F16, Vòng 9)         | ✅ (chưa tự verify UI thật trên Windows — xem CONTRACTS.md Mục 18.3)                                                                       |
 | Phase 4 (đề xuất)  | Đóng gói `.exe` chuyên nghiệp + retest toàn bộ trên Windows thật                              | Khuyến nghị làm **trước tiên** trong Phase 4 — lộ ra bug đóng gói (DPAPI, đường dẫn, antivirus) không thể lường hết khi chỉ chạy từ source |
 | Phase 4 (cân nhắc) | `faster-whisper` chạy local — fallback khi mất mạng/hết quota cả 3 provider (F15)             | Chỉ làm nếu thực sự cần dùng nơi mạng không ổn định — kéo theo PyTorch, ảnh hưởng mục tiêu ".exe nhẹ"                                      |
 | Phase 4 (cân nhắc) | Diarization — phân biệt người nói (F12)                                                       | Chỉ làm nếu use-case thật cần biết "ai nói câu nào"                                                                                        |
@@ -378,6 +420,7 @@ Kết quả nằm tại `dist/AIMeetingCompanion/AIMeetingCompanion.exe`, chạy
 - **Diarization và chế độ offline hoàn toàn** chưa được triển khai (xem Phase 4).
 - **Bối cảnh cuộc họp (F16)** hiện chỉ ảnh hưởng "Nhờ AI trả lời" — dịch transcript song ngữ realtime và tổng hợp biên bản cuối họp CHƯA dùng tới, dù đã thiết kế dự phòng cho việc mở rộng sau này (xem CONTRACTS.md Mục 18).
 - **Skin UI `qt_material`** (Vòng 9) là tuỳ chọn, chưa tự verify hiển thị thật trên Windows kết hợp với `theme.qss` có đẹp/dễ nhìn như kỳ vọng không.
+- **Ẩn cửa sổ khỏi screen share (F17)** chỉ ẩn "sạch" (không khối đen) trên Windows 10 bản 2004+/11 và chỉ chặn capture ở tầng hệ điều hành — xem chi tiết ở mục [Ẩn cửa sổ khỏi screen share](#️-ẩn-cửa-sổ-khỏi-screen-share).
 - Nội dung nhạy cảm (số liệu công ty, thông tin khách hàng) đi qua API cloud của bên thứ ba theo đúng chính sách của từng provider — người dùng cần tự cân nhắc trước khi dùng cho cuộc họp có nội dung mật.
 
 ---

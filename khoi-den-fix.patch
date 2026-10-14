@@ -1,0 +1,701 @@
+From f8f292c00be4ba753da84f2152617d8102fd6286 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 14 Oct 2026 09:17:26 +0000
+Subject: [PATCH] =?UTF-8?q?fix(capture):=20tr=C3=A1nh=20kh=E1=BB=91i=20?=
+ =?UTF-8?q?=C4=91en=20khi=20share=20m=C3=A0n=20h=C3=ACnh=20tr=C3=AAn=20Win?=
+ =?UTF-8?q?dows=20<=2010=20b=E1=BA=A3n=202004?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Kiểm tra số build (>= 19041) trước khi gọi WDA_EXCLUDEFROMCAPTURE; build cũ
+  thì không áp (HĐH sẽ ra khối đen) và báo ⚠ kèm lý do.
+- Đọc lại affinity bằng GetWindowDisplayAffinity; bị hạ xuống WDA_MONITOR thì
+  báo lỗi và gỡ về WDA_NONE.
+- Settings hiện lý do cụ thể; log build lúc khởi động.
+- Test 19 -> 25; README mục "Ẩn cửa sổ khỏi screen share"; TASKS/CHANGELOG
+  Mục 42; thêm CONSTITUTION.md, PRD.md.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_019FTzo6KToEzoWH7TCBDUcC
+---
+ CHANGELOG.md                     |  41 +++++++++++
+ CONSTITUTION.md                  |  39 ++++++++++
+ PRD.md                           |  36 +++++++++
+ README.md                        |  56 +++++++++++++-
+ TASKS.md                         |  23 ++++++
+ app/ui/capture_protection.py     | 120 ++++++++++++++++++++++++++++--
+ app/ui/settings_dialog.py        |   5 +-
+ tests/test_capture_protection.py | 121 ++++++++++++++++++++++++++++++-
+ 8 files changed, 427 insertions(+), 14 deletions(-)
+ create mode 100644 CONSTITUTION.md
+ create mode 100644 PRD.md
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index cedc2e6..6af7c60 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1310,3 +1310,44 @@ sửa các hàm cũ.
+ 3. Share màn hình tới tài khoản khác: lúc 🛡 người xem KHÔNG thấy app (cả
+    Settings, menu chuột phải); tắt đi thì thấy.
+ 4. Đóng app, mở lại: trạng thái được giữ đúng như lần chọn cuối.
++
++## Mục 42 — Sửa khối đen khi share màn hình (T46–T49)
++
++**Triệu chứng (test thật trên Google Meet)**: nội dung app đã ẩn nhưng người
++xem — và cả ảnh chụp màn hình — thấy 1 KHỐI ĐEN đúng chỗ cửa sổ app. Gây khó
++chịu khi đang share màn hình để hướng dẫn dùng app.
++
++**Nguyên nhân (giả thuyết mạnh nhất, CHƯA xác nhận trên máy người dùng)**:
++tài liệu Microsoft (`SetWindowDisplayAffinity`) và tài liệu Electron
++(`setContentProtection`) đều ghi: trên Windows < 10 bản 2004, `0x11` hoạt động
++như `WDA_MONITOR` (khối đen). API KHÔNG trả thất bại ở trường hợp đó nên code
++cũ (Mục 40/41) báo `🛡` dù thực tế ra khối đen. Giả định cũ trong docstring
++("Windows cũ -> API thất bại -> cảnh báo ⚠") là SAI.
++
++**Sửa** (`app/ui/capture_protection.py`, `app/ui/settings_dialog.py`):
++1. `windows_build()` + `unsupported_reason()` — build < 19041 thì KHÔNG gọi
++   0x11 (tránh sinh khối đen), `ok=False`, nêu rõ số build.
++2. Đọc lại affinity thật bằng `GetWindowDisplayAffinity` sau khi áp; khác 0x11
++   => báo lỗi + tự gỡ về `WDA_NONE`.
++3. `controller.problem` + ⚙️ Cài đặt hiển thị lý do cụ thể; log build lúc khởi
++   động (`capture_protection: Windows build ...`) để chẩn đoán từ xa.
++
++**Test**: `tests/test_capture_protection.py` 19 -> 25 test (thêm: ngưỡng build,
++`windows_build()`, build cũ không gọi 0x11, readback bị hạ 0x01, readback đúng
++0x11, `install()` trên build cũ, note trong Settings nêu số build). Toàn bộ
++238 test (bỏ qua ui_smoke/transcript_bubble) + `test_ui_smoke.py` PASS trong
++sandbox Linux.
++
++**Trade-off**: trên Windows < 2004 app giờ KHÔNG ẩn được nữa (cửa sổ hiện đầy
++đủ với người xem + cảnh báo ⚠) thay vì ẩn kèm khối đen. Không có cách ẩn "sạch"
++trên bản Windows đó — chỉ cập nhật Windows.
++
++**CHƯA verify (cần bạn tự làm trên Windows thật)**:
++1. Chạy `python -c "import sys; print(sys.getwindowsversion().build)"`. Nếu
++   < 19041 => đúng nguyên nhân; cập nhật Windows rồi test lại Meet.
++2. Nếu >= 19041 mà VẪN khối đen => sửa này không giải quyết được trường hợp
++   của bạn. Gửi: số build, `app.log` (dòng `capture_protection:`), GPU/driver,
++   đang share "Toàn màn hình" hay "Cửa sổ" hay "Tab", có dùng Remote Desktop/VM
++   không. KHÔNG đoán tiếp khi chưa có dữ liệu (T50).
++3. Với build mới: tick checkbox -> title `🛡`; share Meet sang tài khoản khác ->
++   người xem KHÔNG thấy khối đen.
+diff --git a/CONSTITUTION.md b/CONSTITUTION.md
+new file mode 100644
+index 0000000..d69d0f9
+--- /dev/null
++++ b/CONSTITUTION.md
+@@ -0,0 +1,39 @@
++# CONSTITUTION.md
++
++> Tạo mới theo quy trình HARNESS (repo chưa có file này). Nội dung rút từ
++> README.md / TASKS.md / CHANGELOG.md hiện có — không thêm quyết định mới.
++> `CONTRACTS.md` (nguồn sự thật chi tiết) nằm trong `.gitignore`, chỉ có ở máy
++> dev, nên KHÔNG được dựa vào nó khi làm việc từ bản clone GitHub.
++
++## Quyết định kiến trúc đã khoá
++
++- Ngôn ngữ/UI: Python 3.11+, PySide6. Chạy bằng `python -m app.main`
++  (KHÔNG `python app/main.py`).
++- AI qua interface trừu tượng `AIProvider` (`app/ai/base_provider.py`); chọn
++  provider ở 1 điểm duy nhất: `provider_factory.create_provider()`.
++  Groq/OpenAI dùng chung `OpenAICompatProvider`; Gemini STT viết riêng qua REST.
++- Lưu local: SQLite (`app/storage/db.py`), key/provider ở `config_store.py`
++  (DPAPI trên Windows). Tuỳ chọn UI ở file RIÊNG `ui_prefs.json` — vì
++  `save_api_key()`/`clear_api_key()`/`set_active_provider()` dựng lại toàn bộ
++  `config.json` và xoá field lạ.
++- Log ra `%APPDATA%\AIMeetingCompanion\app.log` qua `app/logging_setup.py`.
++- Ẩn cửa sổ khỏi capture: `WDA_EXCLUDEFROMCAPTURE (0x11)` qua `ctypes`, 1 event
++  filter ở QApplication áp cho mọi top-level window. Cần Windows build >= 19041.
++  KHÔNG fallback `WDA_MONITOR`; KHÔNG giả vờ "đang ẩn" khi chưa chắc.
++- Quy ước đặt tên: module `snake_case`, test `tests/test_*.py`, tên test mô
++  tả hành vi (tiếng Việt không dấu), comment/docstring tiếng Việt.
++
++## Bảng ranh giới 3 tầng
++
++| Tầng | Nội dung |
++| --- | --- |
++| **ALWAYS DO** (không cần hỏi) | Chạy test liên quan sau mỗi thay đổi; ghi `CHANGELOG.md` + cập nhật `TASKS.md` mỗi task; ghi rõ phần CHƯA verify trên Windows thật; monkeypatch `config_store.load_api_key` trong test provider; giữ thay đổi trong phạm vi task. |
++| **ASK FIRST** (xác nhận trước) | Thêm dependency mới; đổi schema DB / interface `AIProvider`; sửa `config_store.py` ngoài việc nối thêm hàm; đổi phím tắt toàn cục; đổi hành vi mặc định của tính năng đã phát hành; bắt đầu mục Backlog; push/đóng gói bản phát hành. |
++| **NEVER DO** (dừng hẳn) | Commit `.env`/API key/`meetings.db`; bỏ qua test thất bại; nhận "đã xong" khi chưa chạy verify; tự ý fallback `WDA_MONITOR`; hiển thị 🛡 khi chưa xác nhận affinity áp được; mở rộng scope âm thầm; gọi API Windows khi tính năng chưa từng bật. |
++
++## Bài học đã thành luật
++
++- Test `Provider()` không truyền `api_key` PHẢI monkeypatch
++  `config_store.load_api_key` (máy dev có key thật lưu sẵn sẽ làm test fail giả).
++- Windows < 10 bản 2004: `SetWindowDisplayAffinity(0x11)` trả "thành công"
++  nhưng ra KHỐI ĐEN -> PHẢI kiểm tra số build và đọc lại affinity (Mục 42).
+diff --git a/PRD.md b/PRD.md
+new file mode 100644
+index 0000000..4acd83e
+--- /dev/null
++++ b/PRD.md
+@@ -0,0 +1,36 @@
++# PRD.md
++
++> Tạo mới theo quy trình HARNESS (repo chưa có file này). Rút từ README.md —
++> tóm tắt, không thay thế README. Nguồn sự thật cho "cái gì" và "vì sao".
++
++## Mục tiêu
++
++Trợ lý họp cho người yếu ngoại ngữ khi họp với cấp trên/khách hàng nước ngoài:
++thu âm hệ thống (loopback WASAPI) -> STT -> transcript song ngữ thời gian
++thực -> gợi ý trả lời bằng tiếng mẹ đẻ + dịch ngược -> biên bản cuối họp.
++Miễn phí cho cá nhân, không khoá vào 1 nhà cung cấp AI (Groq/OpenAI/Gemini).
++
++## Người dùng mục tiêu
++
++Người đi làm/đi học họp bằng ngoại ngữ (Meet/Zoom/Teams), dùng Windows 10/11,
++tự mang API key của mình.
++
++## Tính năng (ưu tiên)
++
++P0 (xong): F1–F11, F13, F14, F16 — xem bảng trong README.md.
++P1 (xong): **F17 Ẩn cửa sổ khỏi screen share** — khi share màn hình (vd để
++hướng dẫn dùng app), người xem KHÔNG thấy cửa sổ app và KHÔNG thấy khối đen;
++bạn vẫn thấy bình thường. Bật/tắt bằng ⚙️ Cài đặt hoặc `Ctrl+Alt+Shift+F9`.
++P2 (chưa làm): F12 diarization, F15 STT offline.
++
++## Kiến trúc
++
++Xem README.md mục "Kiến trúc hệ thống" và CONSTITUTION.md.
++
++## Rủi ro đã biết
++
++- F17 chỉ chặn capture tầng HĐH; cần Windows 10 build >= 19041; trên bản cũ
++  hơn HĐH ra khối đen nên app từ chối bật (Mục 42). Chưa xác nhận được trên
++  mọi cấu hình GPU/trình duyệt (T50).
++- Chất lượng STT/dịch phụ thuộc provider + tạp âm (T35/T36 đang hoãn).
++- Nội dung họp đi qua API cloud của bên thứ ba.
+diff --git a/README.md b/README.md
+index 94e2bed..4d66405 100644
+--- a/README.md
++++ b/README.md
+@@ -17,6 +17,7 @@
+ - [Giới thiệu](#-giới-thiệu)
+ - [Vấn đề & giải pháp](#-vấn-đề--giải-pháp)
+ - [Tính năng chính](#-tính-năng-chính)
++- [Ẩn cửa sổ khỏi screen share](#️-ẩn-cửa-sổ-khỏi-screen-share)
+ - [Kiến trúc hệ thống](#-kiến-trúc-hệ-thống)
+ - [Công nghệ sử dụng](#-công-nghệ-sử-dụng)
+ - [Cấu trúc thư mục](#-cấu-trúc-thư-mục)
+@@ -75,6 +76,7 @@
+ | F13 | Lịch sử các cuộc họp cũ, tìm kiếm theo nội dung transcript                    | ✅ Hoàn thiện                                     |
+ | F14 | Chọn provider AI (**Groq / OpenAI / Gemini**) trong Settings, tự nhập API key | ✅ Hoàn thiện                                     |
+ | F16 | Nhập trước **bối cảnh cuộc họp** (gõ tay + tải file `.txt`/`.md`) để "Nhờ AI trả lời" gợi ý sát tình huống hơn | ✅ Hoàn thiện (Vòng 9)                            |
++| F17 | **Ẩn toàn bộ cửa sổ app khỏi screen share/quay màn hình** (bật/tắt bằng ⚙️ Cài đặt hoặc phím tắt `Ctrl+Alt+Shift+F9`) — xem mục [Ẩn cửa sổ khỏi screen share](#️-ẩn-cửa-sổ-khỏi-screen-share) | ✅ Hoàn thiện (cần Windows 10 bản 2004+) |
+ | F12 | Phân biệt người nói (diarization)                                             | ⏳ Chưa làm (Phase 4, cân nhắc theo nhu cầu thật) |
+ | F15 | Chế độ hoàn toàn offline (STT local bằng `faster-whisper`)                    | ⏳ Chưa làm (Phase 4, cân nhắc theo nhu cầu thật) |
+ 
+@@ -87,6 +89,50 @@
+ 
+ ---
+ 
++## 🛡️ Ẩn cửa sổ khỏi screen share
++
++Khi bạn đang chia sẻ màn hình (Google Meet, Zoom, Teams...) hoặc quay màn hình (OBS...), **mọi cửa sổ của app** — cửa sổ chính, "Hỏi AI", khung gợi ý trả lời, ⚙️ Cài đặt, menu chuột phải — có thể được ẩn khỏi hình người xem thấy, trong khi **bạn vẫn nhìn thấy bình thường** trên màn hình của mình. Người xem thấy phần nền phía sau như thể app không tồn tại — **không có khối đen**.
++
++### Cách dùng
++
++| Cách                          | Chi tiết                                                                                                      |
++| ----------------------------- | ------------------------------------------------------------------------------------------------------------- |
++| Checkbox trong ⚙️ **Cài đặt** | Tick là áp dụng **ngay**, không cần bấm Lưu. Lựa chọn được nhớ cho lần mở app sau (file `ui_prefs.json`).     |
++| Phím tắt toàn cục             | `Ctrl+Alt+Shift+F9` — bật/tắt ngay cả khi Zoom/Meet/Teams đang giữ focus. Cố ý chọn tổ hợp dài để khó bấm nhầm. |
++| `.env` (tuỳ chọn)             | `AI_MEETING_HIDE_FROM_CAPTURE=1` — chỉ dùng làm giá trị khởi đầu nếu bạn chưa từng chọn trong Cài đặt.         |
++
++**Mặc định là TẮT** (bản `.exe` phát cho người khác dùng, cửa sổ "tự biến mất" khi quay màn hình mà chưa được báo trước sẽ gây bất ngờ).
++
++Tiêu đề cửa sổ chính là chỉ báo trạng thái (chỉ bạn thấy):
++
++- `🛡 (ẩn khỏi share)` — đang ẩn thành công.
++- `⚠ (KHÔNG ẩn được khỏi share)` — đã bật nhưng **không** ẩn được; cửa sổ vẫn hiện với người xem. Lý do cụ thể hiển thị trong ⚙️ Cài đặt và ghi trong `app.log`.
++- Không có hậu tố — tính năng đang tắt, cửa sổ hiện bình thường.
++
++### Cơ chế & yêu cầu
++
++App gọi `SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)` (qua `ctypes`, không thêm dependency) cho **mọi cửa sổ cấp cao nhất** thông qua 1 event filter ở tầng `QApplication`.
++
++> ⚠️ **Yêu cầu Windows 10 bản 2004 (build 19041) trở lên, hoặc Windows 11.** Trên Windows cũ hơn, hệ điều hành **âm thầm** xử lý cờ này như `WDA_MONITOR` — API vẫn báo "thành công" nhưng người xem (và cả ảnh chụp màn hình) thấy **một khối đen** đè đúng chỗ cửa sổ. Từ bản cập nhật này app **tự kiểm tra số build** trước khi bật và **đọc lại affinity thực tế** sau khi áp dụng: nếu Windows quá cũ hoặc bị hạ cấp, app **không** áp dụng (để không sinh khối đen), hiện `⚠` + giải thích lý do thay vì giả vờ đã ẩn.
++
++Kiểm tra bản Windows của bạn: nhấn `Win + R`, gõ `winver`, hoặc chạy:
++
++```powershell
++python -c "import sys; print(sys.getwindowsversion().build)"   # cần >= 19041
++```
++
++Khi khởi động, `app.log` (`%APPDATA%\AIMeetingCompanion\app.log`) ghi một dòng `capture_protection: Windows build ...` để dễ chẩn đoán từ xa.
++
++### Giới hạn thật (không nhận vơ)
++
++- Chỉ chặn capture ở **tầng hệ điều hành**. **Không** chặn: quay bằng điện thoại/máy ảnh, capture card phần cứng, phần mềm giám sát cấp driver/kernel. Đây không phải cơ chế bảo mật hay DRM.
++- Cần **Desktop Window Manager** đang hoạt động (bình thường trên Windows 10/11; có thể không hiệu quả trong một số phiên Remote Desktop/máy ảo).
++- **Tắt giữa buổi share = cửa sổ lộ NGAY** với mọi người đang xem. Hãy nhìn tiêu đề `🛡` trước khi chia sẻ.
++- Nếu `⚠` xuất hiện dù Windows đã đủ mới: thử cập nhật driver card đồ hoạ, tắt/bật lại share, và gửi `app.log` để chẩn đoán — một số cấu hình GPU/trình duyệt có thể xử lý cờ này khác chuẩn.
++- Phím tắt cố định (chưa cho đổi trong Settings); nếu bị app khác chiếm, app chỉ ghi cảnh báo vào log và checkbox vẫn dùng được.
++
++---
++
+ ## 🏗️ Kiến trúc hệ thống
+ 
+ ### Luồng dữ liệu
+@@ -254,7 +300,9 @@ ai-meeting-companion/
+ │       ├── ask_question_dialog.py # "Tôi muốn hỏi" — chiều ngược lại
+ │       ├── report_view.py         # Dialog xem/tạo lại/xuất biên bản
+ │       ├── history_dialog.py      # Xem/tìm lại phiên họp cũ
+-│       ├── settings_dialog.py     # Chọn provider AI + nhập API key
++│       ├── settings_dialog.py     # Chọn provider AI + nhập API key + checkbox ẩn khỏi share
++│       ├── capture_protection.py  # Ẩn mọi cửa sổ khỏi screen share (WDA_EXCLUDEFROMCAPTURE)
++│       ├── global_hotkey.py       # Phím tắt toàn cục Ctrl+Alt+Shift+F9 (RegisterHotKey)
+ │       ├── ai_worker.py           # OneShotAIWorker — chạy 1 lệnh AI trên thread riêng
+ │       └── theme.qss              # Dark-mode theme
+ ├── scripts/                       # Script test riêng từng phần qua terminal (debug nhanh)
+@@ -270,7 +318,7 @@ ai-meeting-companion/
+ 
+ ### Yêu cầu
+ 
+-- Windows 10/11 (audio loopback WASAPI là tính năng riêng của Windows)
++- Windows 10/11 (audio loopback WASAPI là tính năng riêng của Windows). Riêng tính năng [ẩn cửa sổ khỏi screen share](#️-ẩn-cửa-sổ-khỏi-screen-share) cần **Windows 10 bản 2004 (build 19041) trở lên**
+ - Python 3.11+
+ - API key của **ít nhất 1** trong 3 provider: [Groq](https://console.groq.com) (miễn phí, khuyến nghị bắt đầu), [OpenAI](https://platform.openai.com), hoặc [Gemini](https://ai.google.dev)
+ 
+@@ -329,12 +377,13 @@ python tests/test_pipeline.py
+ python tests/test_report_export.py
+ python tests/test_config_store.py
+ python tests/test_capture.py
++python -m pytest tests/test_capture_protection.py -v       # ẩn khỏi screen share (25 test, user32 giả)
+ QT_QPA_PLATFORM=offscreen python tests/test_ui_smoke.py   # bỏ biến này trên Windows có màn hình thật
+ ```
+ 
+ Phạm vi test bao phủ: logic cắt segment VAD, logic transcribe/translate/suggest_answer/summarize của cả 3 provider (kể cả lựa chọn qua `provider_factory`), schema + CRUD SQLite, ghép nối toàn pipeline (kể cả lọc hallucination qua `no_speech_prob`), nội dung + font khi xuất `.docx`/`.pdf`, lưu/đọc API key local, phát hiện đổi thiết bị phát âm thanh, và toàn bộ wiring UI ↔ thread ↔ DB không bị treo/crash.
+ 
+-**Không thể test được trong môi trường CI/sandbox** (cần xác nhận thủ công trên Windows thật): chất lượng output thật của AI (độ chính xác STT, độ tự nhiên bản dịch), độ trễ network thật, audio loopback thật, mã hoá DPAPI thật, hiển thị đúng dấu tiếng Việt khi xuất PDF với font hệ thống "Segoe UI".
++**Không thể test được trong môi trường CI/sandbox** (cần xác nhận thủ công trên Windows thật): chất lượng output thật của AI (độ chính xác STT, độ tự nhiên bản dịch), độ trễ network thật, audio loopback thật, mã hoá DPAPI thật, hiển thị đúng dấu tiếng Việt khi xuất PDF với font hệ thống "Segoe UI", và **hành vi thật của tính năng ẩn cửa sổ khỏi screen share** với từng phần mềm họp/quay màn hình (test chỉ dùng `user32` giả để kiểm tra đúng HWND, đúng cờ, đúng nhánh lỗi).
+ 
+ ---
+ 
+@@ -378,6 +427,7 @@ Kết quả nằm tại `dist/AIMeetingCompanion/AIMeetingCompanion.exe`, chạy
+ - **Diarization và chế độ offline hoàn toàn** chưa được triển khai (xem Phase 4).
+ - **Bối cảnh cuộc họp (F16)** hiện chỉ ảnh hưởng "Nhờ AI trả lời" — dịch transcript song ngữ realtime và tổng hợp biên bản cuối họp CHƯA dùng tới, dù đã thiết kế dự phòng cho việc mở rộng sau này (xem CONTRACTS.md Mục 18).
+ - **Skin UI `qt_material`** (Vòng 9) là tuỳ chọn, chưa tự verify hiển thị thật trên Windows kết hợp với `theme.qss` có đẹp/dễ nhìn như kỳ vọng không.
++- **Ẩn cửa sổ khỏi screen share (F17)** chỉ ẩn "sạch" (không khối đen) trên Windows 10 bản 2004+/11 và chỉ chặn capture ở tầng hệ điều hành — xem chi tiết ở mục [Ẩn cửa sổ khỏi screen share](#️-ẩn-cửa-sổ-khỏi-screen-share).
+ - Nội dung nhạy cảm (số liệu công ty, thông tin khách hàng) đi qua API cloud của bên thứ ba theo đúng chính sách của từng provider — người dùng cần tự cân nhắc trước khi dùng cho cuộc họp có nội dung mật.
+ 
+ ---
+diff --git a/TASKS.md b/TASKS.md
+index d7a1a1f..8f0b55f 100644
+--- a/TASKS.md
++++ b/TASKS.md
+@@ -585,3 +585,26 @@ cả `test_ui_smoke.py` (32/32, tăng từ 30, +2: T31) và `test_pipeline.py`
+   ở CHANGELOG Mục 41).
+ - ⚪ T45 (chưa chốt, ASK FIRST) — nhắc phím tắt trong HelpDialog; cho đổi
+   tổ hợp phím trong Settings.
++
++## Mục 42 — Sửa khối đen khi share màn hình (xem CHANGELOG.md)
++
++**Bối cảnh**: test thật trên Google Meet: nội dung app bị ẩn nhưng người xem
++(và ảnh chụp màn hình) thấy 1 KHỐI ĐEN đè đúng chỗ cửa sổ. Nguyên nhân khả dĩ
++nhất (theo tài liệu Microsoft + Electron): Windows < 10 bản 2004 (build <
++19041) xử lý `0x11` như `WDA_MONITOR` mà `SetWindowDisplayAffinity` vẫn trả
++"thành công" -> code cũ tưởng đã ẩn (🛡) nhưng thực tế ra khối đen.
++
++- 🔒 T46 (✅ done+verified offline) — `windows_build()` + `unsupported_reason()`
++  trong `capture_protection.py`; build < 19041 => KHÔNG gọi 0x11, `ok=False`,
++  `problem` nêu số build. Acceptance: test không gọi `0x11` khi build cũ.
++- 🔒 T47 (✅ done+verified offline) — đọc lại affinity bằng
++  `GetWindowDisplayAffinity` sau khi áp; khác 0x11 => `ok=False` + tự gỡ về
++  `WDA_NONE` (không để lại khối đen). Acceptance: 3 test (hạ 0x01 / đúng 0x11 /
++  fake không có hàm đọc lại).
++- 🔒 T48 (✅ done+verified offline) — `controller.problem` + ⚙️ Cài đặt hiện
++  lý do cụ thể (số build) thay vì câu chung chung; log build lúc khởi động.
++- 🔒 T49 (✅ done) — README: mục "Ẩn cửa sổ khỏi screen share" (F17), yêu cầu
++  Windows 2004+, cách kiểm tra build, giới hạn thật.
++- ⚪ T50 (CHỜ người dùng gửi số build + `app.log`) — nếu máy đã >= 19041 mà
++  vẫn khối đen thì nguyên nhân là chỗ khác (GPU/driver/trình duyệt/phiên
++  Remote Desktop); cần dữ liệu thật trước khi sửa tiếp, KHÔNG đoán mù.
+diff --git a/app/ui/capture_protection.py b/app/ui/capture_protection.py
+index 0403268..a68e21d 100644
+--- a/app/ui/capture_protection.py
++++ b/app/ui/capture_protection.py
+@@ -22,11 +22,21 @@ QUYẾT ĐỊNH THIẾT KẾ (đọc trước khi sửa):
+    thì dialog đó sẽ lộ ra trong buổi share. Áp ở cả `WinIdChange` (lúc tạo
+    handle) lẫn `Show` để giảm khoảng hở trước khi cửa sổ hiện.
+ 3. KHÔNG fallback sang `WDA_MONITOR` (0x01) khi Windows cũ không hỗ trợ
+-   0x11: chế độ đó khiến người xem thấy 1 KHỐI ĐEN đúng chỗ cửa sổ -- còn
+-   lộ hơn là không ẩn. Thà báo lỗi rõ ràng.
+-4. KHÔNG báo "đang ẩn" nếu API thất bại: `ok=False` + tiêu đề cửa sổ hiện
+-   ⚠ (xem `window_title_suffix`). Giả vờ an toàn nguy hiểm hơn là cảnh báo.
++   0x11: chế độ đó khiến người xem thấy 1 KHỐI ĐEN đúng chỗ cửa sổ.
++   ⚠️ BÀI HỌC (phát hiện khi test thật trên Meet): trên Windows < 10 bản
++   2004 (build < 19041), `SetWindowDisplayAffinity(hwnd, 0x11)` KHÔNG trả
++   về thất bại -- HĐH âm thầm xử lý 0x11 như `WDA_MONITOR` => API báo
++   "thành công" nhưng người xem thấy khối đen đè lên. Vì vậy PHẢI tự kiểm
++   tra số build (`windows_build()`) TRƯỚC khi gọi API, và đọc lại affinity
++   thực tế bằng `GetWindowDisplayAffinity` SAU khi gọi (xem `_apply`).
++4. KHÔNG báo "đang ẩn" nếu API thất bại / build quá cũ / affinity đọc lại
++   khác 0x11: `ok=False` + tiêu đề cửa sổ hiện ⚠ (xem `window_title_suffix`)
++   + `controller.problem` giải thích lý do (hiện ở ⚙️ Cài đặt và `app.log`).
++   Giả vờ an toàn nguy hiểm hơn là cảnh báo.
+ 5. Khi chưa từng bật, controller HOÀN TOÀN không gọi API Windows nào.
++6. Build quá cũ => KHÔNG gọi 0x11 (tránh khối đen). Cửa sổ vẫn hiện bình
++   thường trong share + cảnh báo ⚠ -- không có cách ẩn không-đen trên bản
++   Windows đó, chỉ có cập nhật Windows lên 10 bản 2004+ / Windows 11.
+ 
+ GIỚI HẠN THẬT (không nhận vơ):
+ - Chỉ chặn capture ở tầng hệ điều hành. KHÔNG chặn: quay bằng điện thoại,
+@@ -44,6 +54,7 @@ from __future__ import annotations
+ import ctypes
+ import os
+ import platform
++import sys
+ from ctypes import wintypes
+ from typing import Callable, Optional
+ 
+@@ -59,6 +70,10 @@ ENV_VAR = "AI_MEETING_HIDE_FROM_CAPTURE"
+ WDA_NONE = 0x00000000
+ WDA_EXCLUDEFROMCAPTURE = 0x00000011  # Windows 10 2004+
+ 
++# Build Windows 10 bản 2004. Dưới mốc này HĐH xử lý 0x11 như WDA_MONITOR
++# (khối đen) mà API vẫn trả "thành công" -- xem docstring đầu file, mục 3.
++MIN_BUILD_EXCLUDE = 19041
++
+ # Chọn tổ hợp F-key dài, khó bấm nhầm: bấm nhầm = lộ cửa sổ ra buổi share.
+ # Tránh Ctrl+Shift+H (theo mình nhớ là "cúp máy" của Teams).
+ HOTKEY_LABEL = "Ctrl+Alt+Shift+F9"
+@@ -81,6 +96,32 @@ def window_title_suffix(enabled: bool, ok: bool) -> str:
+     return " 🛡 (ẩn khỏi share)" if ok else " ⚠ (KHÔNG ẩn được khỏi share)"
+ 
+ 
++def windows_build() -> int:
++    """Số build Windows (vd 19045, 22631); 0 nếu không phải Windows/không đọc
++    được. Tách riêng để test thay bằng giá trị giả."""
++    getter = getattr(sys, "getwindowsversion", None)
++    if getter is None:
++        return 0
++    try:
++        return int(getter().build)
++    except Exception:  # noqa: BLE001 - không đọc được thì coi như không rõ
++        return 0
++
++
++def unsupported_reason(build: int) -> str:
++    """Lý do KHÔNG dùng được 0x11 ở build này, hoặc "" nếu dùng được.
++    `build == 0` (không đọc được) được coi là KHÔNG rõ -> vẫn thử, nhưng bước
++    đọc lại affinity trong `_apply` sẽ bắt trường hợp bị hạ cấp."""
++    if 0 < build < MIN_BUILD_EXCLUDE:
++        return (
++            f"Windows build {build} cũ hơn Windows 10 bản 2004 (build {MIN_BUILD_EXCLUDE}): "
++            "hệ điều hành sẽ biến 'ẩn khỏi capture' thành KHỐI ĐEN đè lên cửa sổ, "
++            "nên app KHÔNG bật tính năng này. Hãy cập nhật Windows lên 10 bản 2004+ "
++            "hoặc Windows 11."
++        )
++    return ""
++
++
+ def get_controller() -> Optional["CaptureProtectionController"]:
+     """Controller đã cài (singleton), hoặc None (không phải Windows / chưa
+     cài). UI dùng để hiện checkbox -- None => checkbox bị vô hiệu."""
+@@ -95,6 +136,8 @@ def _get_user32():
+     user32 = ctypes.windll.user32
+     user32.SetWindowDisplayAffinity.argtypes = [wintypes.HWND, wintypes.DWORD]
+     user32.SetWindowDisplayAffinity.restype = wintypes.BOOL
++    user32.GetWindowDisplayAffinity.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
++    user32.GetWindowDisplayAffinity.restype = wintypes.BOOL
+     user32.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT]
+     user32.RegisterHotKey.restype = wintypes.BOOL
+     user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
+@@ -116,11 +159,16 @@ class CaptureProtectionController(QObject):
+         enabled: bool = False,
+         persist: Optional[Callable[[bool], None]] = None,
+         parent: Optional[QObject] = None,
++        unsupported: str = "",
+     ) -> None:
+         super().__init__(parent)
+         self._user32 = user32
+         self._enabled = bool(enabled)
+         self._persist = persist
++        # Khác rỗng = HĐH này không có chế độ ẩn "sạch" (xem unsupported_reason):
++        # KHÔNG gọi 0x11 để khỏi sinh khối đen, chỉ báo lỗi.
++        self._unsupported = unsupported
++        self._problem = ""
+         self._ok = True
+         # Chỉ gọi WDA_NONE khi đã TỪNG bật -- chưa bật bao giờ thì không đụng API.
+         self._touched = self._enabled
+@@ -134,6 +182,12 @@ class CaptureProtectionController(QObject):
+     def ok(self) -> bool:
+         return self._ok
+ 
++    @property
++    def problem(self) -> str:
++        """Lý do gần nhất khiến `ok=False` (rỗng nếu chưa có lỗi) -- UI hiển thị
++        để người dùng biết vì sao cửa sổ không ẩn được / bị khối đen."""
++        return self._problem
++
+     def toggle(self) -> bool:
+         return self.set_enabled(not self._enabled)
+ 
+@@ -144,6 +198,7 @@ class CaptureProtectionController(QObject):
+         if self._enabled:
+             self._touched = True
+         self._ok = True
++        self._problem = ""
+         self.apply_to_visible_windows()
+         if persist and self._persist is not None:
+             try:
+@@ -178,6 +233,10 @@ class CaptureProtectionController(QObject):
+         (1 lần) và đặt `ok=False` nếu đang BẬT."""
+         if not self._enabled and not self._touched:
+             return True
++        if self._enabled and self._unsupported:
++            # Build quá cũ: gọi 0x11 sẽ thành công "giả" nhưng sinh khối đen.
++            self._fail(self._unsupported)
++            return False
+         affinity = WDA_EXCLUDEFROMCAPTURE if self._enabled else WDA_NONE
+         try:
+             hwnd = int(widget.winId())
+@@ -189,15 +248,47 @@ class CaptureProtectionController(QObject):
+             return False
+         if not ok:
+             self._fail(
+-                "SetWindowDisplayAffinity trả về thất bại (Windows < 10 bản "
+-                "2004 không hỗ trợ WDA_EXCLUDEFROMCAPTURE?) -- cửa sổ này "
++                "SetWindowDisplayAffinity trả về thất bại -- cửa sổ này "
+                 "VẪN HIỆN trong screen share."
+             )
+-        return ok
++            return False
++        if self._enabled and not self._affinity_is_effective(hwnd):
++            return False
++        return True
++
++    def _affinity_is_effective(self, hwnd: int) -> bool:
++        """Đọc lại affinity THỰC TẾ sau khi đặt 0x11. Nếu HĐH đã hạ cấp thành
++        WDA_MONITOR (0x01) thì người xem sẽ thấy KHỐI ĐEN dù API báo thành công
++        -> coi là thất bại (và gỡ ngay về WDA_NONE để không để lại khối đen).
++        Không đọc lại được (user32 giả/thiếu hàm) -> bỏ qua, không đoán."""
++        getter = getattr(self._user32, "GetWindowDisplayAffinity", None)
++        if getter is None:
++            return True
++        try:
++            value = wintypes.DWORD(0)
++            if not getter(hwnd, ctypes.byref(value)):
++                return True
++            actual = int(value.value)
++        except Exception as exc:  # noqa: BLE001 - chỉ là kiểm tra phụ, không được làm crash
++            get_logger().warning("capture_protection: không đọc lại được affinity (%s)", exc)
++            return True
++        if actual == WDA_EXCLUDEFROMCAPTURE:
++            return True
++        try:
++            self._user32.SetWindowDisplayAffinity(hwnd, WDA_NONE)
++        except Exception:  # noqa: BLE001
++            pass
++        self._fail(
++            f"affinity thực tế của cửa sổ là {actual:#x}, không phải 0x11 -- "
++            "HĐH đã hạ xuống chế độ khối đen, nên app tự gỡ ẩn để tránh khối "
++            "đen. Cập nhật Windows lên 10 bản 2004+ / 11."
++        )
++        return False
+ 
+     def _fail(self, msg: str) -> None:
+         if self._enabled:
+             self._ok = False
++            self._problem = msg
+         if not self._warned:
+             self._warned = True
+             get_logger().warning("capture_protection: %s", msg)
+@@ -219,8 +310,21 @@ def install(app: QApplication) -> Optional[CaptureProtectionController]:
+     saved = config_store.load_hide_from_capture()
+     initial = saved if saved is not None else is_enabled_from_env()
+ 
++    build = windows_build()
++    reason = unsupported_reason(build)
++    get_logger().info(
++        "capture_protection: Windows build %s (cần >= %s để ẩn không khối đen)%s",
++        build,
++        MIN_BUILD_EXCLUDE,
++        f" -- KHÔNG hỗ trợ: {reason}" if reason else "",
++    )
++
+     ctrl = CaptureProtectionController(
+-        user32, enabled=initial, persist=config_store.save_hide_from_capture, parent=app
++        user32,
++        enabled=initial,
++        persist=config_store.save_hide_from_capture,
++        parent=app,
++        unsupported=reason,
+     )
+     app.installEventFilter(ctrl)
+     if initial:
+diff --git a/app/ui/settings_dialog.py b/app/ui/settings_dialog.py
+index a7bae8a..dc55d7a 100644
+--- a/app/ui/settings_dialog.py
++++ b/app/ui/settings_dialog.py
+@@ -253,9 +253,10 @@ class SettingsDialog(QDialog):
+                 "thoại/capture card. Tắt giữa buổi share = cửa sổ lộ NGAY."
+             )
+         elif ctrl.enabled:
++            reason = ctrl.problem or "cần Windows 10 bản 2004+."
+             text = (
+-                "⚠ KHÔNG áp dụng được (cần Windows 10 bản 2004+) — cửa sổ VẪN "
+-                "HIỆN trong screen share. Xem app.log."
++                f"⚠ KHÔNG ẩn được khỏi screen share — cửa sổ VẪN HIỆN. {reason} "
++                "Xem app.log."
+             )
+         else:
+             text = "Cửa sổ đang HIỆN bình thường trong screen share."
+diff --git a/tests/test_capture_protection.py b/tests/test_capture_protection.py
+index 0de6fe9..7c70af9 100644
+--- a/tests/test_capture_protection.py
++++ b/tests/test_capture_protection.py
+@@ -24,7 +24,7 @@ from app.ui import global_hotkey as gh  # noqa: E402
+ 
+ 
+ class FakeUser32:
+-    def __init__(self, result=1, raises=None, hotkey_ok=1):
++    def __init__(self, result=1, raises=None, hotkey_ok=1, readback=None):
+         self.calls = []  # (hwnd, affinity)
+         self.hotkeys = []  # ("reg"|"unreg", args)
+         self._result = result
+@@ -32,6 +32,17 @@ class FakeUser32:
+         self._hotkey_ok = hotkey_ok
+         outer = self
+ 
++        if readback is not None:
++            # Mô phỏng `GetWindowDisplayAffinity`: trả về affinity "thực tế" do
++            # HĐH áp (vd 0x01 khi Windows cũ âm thầm hạ 0x11 thành WDA_MONITOR).
++            # Không truyền `readback` -> fake KHÔNG có hàm này (giống user32 giả cũ).
++            class _Get:
++                def __call__(self, hwnd, ref):
++                    ref._obj.value = readback
++                    return 1
++
++            self.GetWindowDisplayAffinity = _Get()
++
+         class _Affinity:
+             def __call__(self, hwnd, affinity):
+                 if outer._raises:
+@@ -181,6 +192,108 @@ def test_luu_lua_chon_loi_khong_chan_viec_doi_trang_thai():
+     assert ctrl.enabled is True
+ 
+ 
++# ------------------------------------------- khối đen trên Windows cũ (Mục 42)
++# Bối cảnh: trên Windows < 10 bản 2004, SetWindowDisplayAffinity(0x11) trả về
++# THÀNH CÔNG nhưng HĐH xử lý như WDA_MONITOR => người xem thấy KHỐI ĐEN.
++
++def test_unsupported_reason_theo_so_build():
++    assert cp.unsupported_reason(0) == ""  # không rõ -> vẫn thử, đã có bước đọc lại
++    assert cp.unsupported_reason(19040) != ""
++    assert "19040" in cp.unsupported_reason(19040)
++    assert cp.unsupported_reason(19041) == ""
++    assert cp.unsupported_reason(22631) == ""
++
++
++def test_windows_build_khong_phai_windows_tra_0_va_doc_duoc_khi_co():
++    with patch.object(sys, "getwindowsversion", None, create=True):  # như nền tảng không có hàm này
++        assert cp.windows_build() == 0
++
++    class _V:
++        build = 19045
++
++    with patch.object(sys, "getwindowsversion", lambda: _V(), create=True):
++        assert cp.windows_build() == 19045
++
++    def boom():
++        raise OSError("x")
++
++    with patch.object(sys, "getwindowsversion", boom, create=True):
++        assert cp.windows_build() == 0
++
++
++def test_build_cu_khong_goi_0x11_bao_loi_ro_rang_va_tat_di_thi_het_loi():
++    app = _app()
++    fake = FakeUser32()
++    ctrl = cp.CaptureProtectionController(fake, enabled=False, unsupported=cp.unsupported_reason(18363))
++    app.installEventFilter(ctrl)
++    emitted = []
++    ctrl.changed.connect(lambda e, ok: emitted.append((e, ok)))
++    w = QWidget()
++    w.show()
++    try:
++        assert ctrl.set_enabled(True) is False
++        assert ctrl.ok is False and "18363" in ctrl.problem
++        assert emitted[-1] == (True, False)
++        assert all(c[1] != cp.WDA_EXCLUDEFROMCAPTURE for c in fake.calls)  # KHÔNG sinh khối đen
++        assert ctrl.set_enabled(False) is True and ctrl.problem == ""
++    finally:
++        app.removeEventFilter(ctrl)
++        w.close()
++
++
++def test_affinity_doc_lai_bi_ha_xuong_monitor_thi_bao_loi_va_go_ve_none():
++    app = _app()
++    fake = FakeUser32(readback=0x01)  # API báo OK nhưng HĐH hạ xuống WDA_MONITOR
++    ctrl = cp.CaptureProtectionController(fake, enabled=False)
++    w = QWidget()
++    w.show()
++    try:
++        assert ctrl.set_enabled(True) is False
++        assert ctrl.ok is False and "0x1" in ctrl.problem
++        assert fake.calls[0] == (int(w.winId()), 0x11)
++        assert fake.calls[-1] == (int(w.winId()), cp.WDA_NONE)  # gỡ để không để lại khối đen
++    finally:
++        w.close()
++
++
++def test_affinity_doc_lai_dung_0x11_thi_ok_va_khong_gui_wda_none():
++    app = _app()
++    fake = FakeUser32(readback=0x11)
++    ctrl = cp.CaptureProtectionController(fake, enabled=False)
++    w = QWidget()
++    w.show()
++    try:
++        assert ctrl.set_enabled(True) is True
++        assert ctrl.problem == ""
++        assert all(c[1] == 0x11 for c in fake.calls)
++    finally:
++        w.close()
++
++
++def test_install_tren_build_cu_dat_unsupported_cho_controller():
++    app = _app()
++    cp._reset_for_tests()
++    fake = FakeUser32()
++    with tempfile.TemporaryDirectory() as tmp, patch.dict(
++        os.environ, {"APPDATA": tmp}
++    ), patch.object(cp, "_get_user32", return_value=fake), patch.object(
++        cp, "windows_build", return_value=17763
++    ):
++        ctrl = cp.install(app)
++        w = QWidget()
++        w.show()
++        try:
++            assert ctrl is not None
++            assert ctrl.set_enabled(True) is False
++            assert "17763" in ctrl.problem
++            assert all(c[1] != 0x11 for c in fake.calls)
++        finally:
++            w.close()
++            app.removeEventFilter(ctrl)
++            app.removeNativeEventFilter(ctrl._hotkey)
++            cp._reset_for_tests()
++
++
+ # ---------------------------------------------------------------- install()
+ 
+ def test_install_khong_phai_windows_tra_ve_none_va_get_controller_none():
+@@ -365,6 +478,12 @@ def test_settings_dialog_checkbox_dong_bo_voi_controller():
+             dlg._capture_checkbox.click()
+             assert ctrl.ok is False
+             assert "⚠" in dlg._capture_note.text() and "🛡" not in dlg._capture_note.text()
++
++            # build Windows cũ -> note phải nêu đúng lý do (số build), không chung chung
++            ctrl._unsupported = cp.unsupported_reason(18363)
++            ctrl.set_enabled(False)
++            dlg._capture_checkbox.click()
++            assert ctrl.ok is False and "18363" in dlg._capture_note.text()
+             dlg.close()
+         finally:
+             cp._reset_for_tests()
+-- 
+2.43.0
+

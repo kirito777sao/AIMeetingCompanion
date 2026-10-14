@@ -253,9 +253,10 @@ class SettingsDialog(QDialog):
                 "thoại/capture card. Tắt giữa buổi share = cửa sổ lộ NGAY."
             )
         elif ctrl.enabled:
+            reason = ctrl.problem or "cần Windows 10 bản 2004+."
             text = (
-                "⚠ KHÔNG áp dụng được (cần Windows 10 bản 2004+) — cửa sổ VẪN "
-                "HIỆN trong screen share. Xem app.log."
+                f"⚠ KHÔNG ẩn được khỏi screen share — cửa sổ VẪN HIỆN. {reason} "
+                "Xem app.log."
             )
         else:
             text = "Cửa sổ đang HIỆN bình thường trong screen share."

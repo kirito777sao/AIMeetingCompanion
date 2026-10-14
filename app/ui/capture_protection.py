@@ -21,9 +21,13 @@ QUYẾT ĐỊNH THIẾT KẾ (đọc trước khi sửa):
    event filter ở tầng QApplication, thay vì sửa từng class -- sót 1 dialog
    thì dialog đó sẽ lộ ra trong buổi share. Áp ở cả `WinIdChange` (lúc tạo
    handle) lẫn `Show` để giảm khoảng hở trước khi cửa sổ hiện.
-3. KHÔNG fallback sang `WDA_MONITOR` (0x01) khi Windows cũ không hỗ trợ
-   0x11: chế độ đó khiến người xem thấy 1 KHỐI ĐEN đúng chỗ cửa sổ -- còn
-   lộ hơn là không ẩn. Thà báo lỗi rõ ràng.
+3. KHÔNG tự fallback sang `WDA_MONITOR` (0x01) trong code. LƯU Ý (phát hiện
+   khi test thật trên Meet, Windows build 17763): trên Windows < 10 bản 2004
+   (build < 19041) HĐH TỰ xử lý 0x11 như `WDA_MONITOR` -- API vẫn trả "thành
+   công" nhưng người xem thấy 1 KHỐI ĐEN đúng chỗ cửa sổ (nội dung vẫn bị
+   ẩn). CHỦ SỞ HỮU DỰ ÁN ĐÃ CHỌN CHẤP NHẬN hành vi này trên máy cũ (không
+   thêm kiểm tra build/cảnh báo, không tắt tính năng); chỉ máy >= 19041 mới
+   ẩn "sạch" không khối đen -- phần này CHƯA test trên máy thật.
 4. KHÔNG báo "đang ẩn" nếu API thất bại: `ok=False` + tiêu đề cửa sổ hiện
    ⚠ (xem `window_title_suffix`). Giả vờ an toàn nguy hiểm hơn là cảnh báo.
 5. Khi chưa từng bật, controller HOÀN TOÀN không gọi API Windows nào.
@@ -31,7 +35,8 @@ QUYẾT ĐỊNH THIẾT KẾ (đọc trước khi sửa):
 GIỚI HẠN THẬT (không nhận vơ):
 - Chỉ chặn capture ở tầng hệ điều hành. KHÔNG chặn: quay bằng điện thoại,
   capture card phần cứng, phần mềm giám sát cấp driver/kernel.
-- `WDA_EXCLUDEFROMCAPTURE` cần Windows 10 bản 2004 (build 19041) trở lên.
+- `WDA_EXCLUDEFROMCAPTURE` cần Windows 10 bản 2004 (build 19041) trở lên để
+  ẩn "sạch". Bản cũ hơn: ẩn nội dung nhưng hiện KHỐI ĐEN (xem mục 3).
 - ⚠️ Tắt bằng phím tắt giữa buổi share = cửa sổ LỘ NGAY LẬP TỨC với mọi
   người đang xem. Tiêu đề cửa sổ (🛡 / ⚠) là chỉ báo trạng thái duy nhất.
 - ⚠️ CHƯA verify được trên Windows thật + Zoom/Teams thật trong sandbox

@@ -24,13 +24,24 @@ from app.ui import global_hotkey as gh  # noqa: E402
 
 
 class FakeUser32:
-    def __init__(self, result=1, raises=None, hotkey_ok=1):
+    def __init__(self, result=1, raises=None, hotkey_ok=1, readback=None):
         self.calls = []  # (hwnd, affinity)
         self.hotkeys = []  # ("reg"|"unreg", args)
         self._result = result
         self._raises = raises
         self._hotkey_ok = hotkey_ok
         outer = self
+
+        if readback is not None:
+            # Mô phỏng `GetWindowDisplayAffinity`: trả về affinity "thực tế" do
+            # HĐH áp (vd 0x01 khi Windows cũ âm thầm hạ 0x11 thành WDA_MONITOR).
+            # Không truyền `readback` -> fake KHÔNG có hàm này (giống user32 giả cũ).
+            class _Get:
+                def __call__(self, hwnd, ref):
+                    ref._obj.value = readback
+                    return 1
+
+            self.GetWindowDisplayAffinity = _Get()
 
         class _Affinity:
             def __call__(self, hwnd, affinity):
@@ -179,6 +190,108 @@ def test_luu_lua_chon_loi_khong_chan_viec_doi_trang_thai():
     ctrl = cp.CaptureProtectionController(FakeUser32(), enabled=False, persist=boom)
     assert ctrl.set_enabled(True) is True
     assert ctrl.enabled is True
+
+
+# ------------------------------------------- khối đen trên Windows cũ (Mục 42)
+# Bối cảnh: trên Windows < 10 bản 2004, SetWindowDisplayAffinity(0x11) trả về
+# THÀNH CÔNG nhưng HĐH xử lý như WDA_MONITOR => người xem thấy KHỐI ĐEN.
+
+def test_unsupported_reason_theo_so_build():
+    assert cp.unsupported_reason(0) == ""  # không rõ -> vẫn thử, đã có bước đọc lại
+    assert cp.unsupported_reason(19040) != ""
+    assert "19040" in cp.unsupported_reason(19040)
+    assert cp.unsupported_reason(19041) == ""
+    assert cp.unsupported_reason(22631) == ""
+
+
+def test_windows_build_khong_phai_windows_tra_0_va_doc_duoc_khi_co():
+    with patch.object(sys, "getwindowsversion", None, create=True):  # như nền tảng không có hàm này
+        assert cp.windows_build() == 0
+
+    class _V:
+        build = 19045
+
+    with patch.object(sys, "getwindowsversion", lambda: _V(), create=True):
+        assert cp.windows_build() == 19045
+
+    def boom():
+        raise OSError("x")
+
+    with patch.object(sys, "getwindowsversion", boom, create=True):
+        assert cp.windows_build() == 0
+
+
+def test_build_cu_khong_goi_0x11_bao_loi_ro_rang_va_tat_di_thi_het_loi():
+    app = _app()
+    fake = FakeUser32()
+    ctrl = cp.CaptureProtectionController(fake, enabled=False, unsupported=cp.unsupported_reason(18363))
+    app.installEventFilter(ctrl)
+    emitted = []
+    ctrl.changed.connect(lambda e, ok: emitted.append((e, ok)))
+    w = QWidget()
+    w.show()
+    try:
+        assert ctrl.set_enabled(True) is False
+        assert ctrl.ok is False and "18363" in ctrl.problem
+        assert emitted[-1] == (True, False)
+        assert all(c[1] != cp.WDA_EXCLUDEFROMCAPTURE for c in fake.calls)  # KHÔNG sinh khối đen
+        assert ctrl.set_enabled(False) is True and ctrl.problem == ""
+    finally:
+        app.removeEventFilter(ctrl)
+        w.close()
+
+
+def test_affinity_doc_lai_bi_ha_xuong_monitor_thi_bao_loi_va_go_ve_none():
+    app = _app()
+    fake = FakeUser32(readback=0x01)  # API báo OK nhưng HĐH hạ xuống WDA_MONITOR
+    ctrl = cp.CaptureProtectionController(fake, enabled=False)
+    w = QWidget()
+    w.show()
+    try:
+        assert ctrl.set_enabled(True) is False
+        assert ctrl.ok is False and "0x1" in ctrl.problem
+        assert fake.calls[0] == (int(w.winId()), 0x11)
+        assert fake.calls[-1] == (int(w.winId()), cp.WDA_NONE)  # gỡ để không để lại khối đen
+    finally:
+        w.close()
+
+
+def test_affinity_doc_lai_dung_0x11_thi_ok_va_khong_gui_wda_none():
+    app = _app()
+    fake = FakeUser32(readback=0x11)
+    ctrl = cp.CaptureProtectionController(fake, enabled=False)
+    w = QWidget()
+    w.show()
+    try:
+        assert ctrl.set_enabled(True) is True
+        assert ctrl.problem == ""
+        assert all(c[1] == 0x11 for c in fake.calls)
+    finally:
+        w.close()
+
+
+def test_install_tren_build_cu_dat_unsupported_cho_controller():
+    app = _app()
+    cp._reset_for_tests()
+    fake = FakeUser32()
+    with tempfile.TemporaryDirectory() as tmp, patch.dict(
+        os.environ, {"APPDATA": tmp}
+    ), patch.object(cp, "_get_user32", return_value=fake), patch.object(
+        cp, "windows_build", return_value=17763
+    ):
+        ctrl = cp.install(app)
+        w = QWidget()
+        w.show()
+        try:
+            assert ctrl is not None
+            assert ctrl.set_enabled(True) is False
+            assert "17763" in ctrl.problem
+            assert all(c[1] != 0x11 for c in fake.calls)
+        finally:
+            w.close()
+            app.removeEventFilter(ctrl)
+            app.removeNativeEventFilter(ctrl._hotkey)
+            cp._reset_for_tests()
 
 
 # ---------------------------------------------------------------- install()
@@ -365,6 +478,12 @@ def test_settings_dialog_checkbox_dong_bo_voi_controller():
             dlg._capture_checkbox.click()
             assert ctrl.ok is False
             assert "⚠" in dlg._capture_note.text() and "🛡" not in dlg._capture_note.text()
+
+            # build Windows cũ -> note phải nêu đúng lý do (số build), không chung chung
+            ctrl._unsupported = cp.unsupported_reason(18363)
+            ctrl.set_enabled(False)
+            dlg._capture_checkbox.click()
+            assert ctrl.ok is False and "18363" in dlg._capture_note.text()
             dlg.close()
         finally:
             cp._reset_for_tests()
